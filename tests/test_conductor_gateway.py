@@ -296,3 +296,257 @@ def test_run_cockpit_tool_honors_env_runner_path(monkeypatch):
     server._run_cockpit_tool("cockpit_receipts_tail", {})
 
     assert captured["argv"][1] == "/custom/runner.mjs"
+
+
+# ── conductor.systemcheck (Developer-OS self-check, SAFE) ─────────────
+
+
+def _make_self_check_runner(result):
+    """Return (runner, calls) recording every argv passed to the self-check."""
+    calls: list[list[str]] = []
+
+    def _runner(argv, timeout):  # noqa: ANN001
+        calls.append(list(argv))
+        return result
+
+    return _runner, calls
+
+
+_READY_MATRIX = {
+    "schema": "developer_os_self_check_v1",
+    "ready": True,
+    "verdict": "READY",
+    "capabilities": [
+        {"name": "CAP-1", "status": "live", "evidence": "ev1", "detail": "d1"},
+        {"name": "CAP-2", "status": "live", "evidence": "ev2", "detail": "d2"},
+    ],
+    "governanceFloors": [
+        {"floor": "FLOOR-1", "holds": True, "evidence": "fe1"},
+    ],
+    "summary": {"capabilitiesLive": 2},
+    "generatedNote": "in-process, dry-run only; no spawn, no execute.",
+}
+
+
+def test_systemcheck_method_is_registered():
+    assert "conductor.systemcheck" in server._methods
+    assert callable(server._methods["conductor.systemcheck"])
+
+
+def test_systemcheck_routed_into_long_handlers():
+    # It spawns a subprocess, so it must dispatch on the long-handler pool.
+    assert "conductor.systemcheck" in server._LONG_HANDLERS
+
+
+def test_systemcheck_returns_report_via_injected_runner(monkeypatch):
+    runner, calls = _make_self_check_runner(_READY_MATRIX)
+    monkeypatch.setattr(server, "_self_check_runner", runner)
+
+    resp = server._methods["conductor.systemcheck"]("r1", {})
+
+    assert "error" not in resp
+    assert resp["result"] == {"ok": True, "report": _READY_MATRIX}
+    # The matrix rides under report verbatim (verdict + rows preserved).
+    assert resp["result"]["report"]["verdict"] == "READY"
+    assert resp["result"]["report"]["capabilities"][0]["name"] == "CAP-1"
+
+
+def test_systemcheck_uses_argv_list_with_json_flag_no_shell(monkeypatch):
+    runner, calls = _make_self_check_runner(_READY_MATRIX)
+    monkeypatch.setattr(server, "_self_check_runner", runner)
+
+    server._methods["conductor.systemcheck"]("r1", {})
+
+    argv = calls[0]
+    assert isinstance(argv, list)
+    # [node, script, "--json"] — args ride as discrete list elements, never a
+    # shell string.
+    assert argv[-1] == "--json"
+    assert len(argv) == 3
+
+
+def test_systemcheck_maps_runner_failure_to_self_check_reason(monkeypatch):
+    runner, _ = _make_self_check_runner(
+        {"ok": False, "reason": "self_check_timeout"}
+    )
+    monkeypatch.setattr(server, "_self_check_runner", runner)
+
+    resp = server._methods["conductor.systemcheck"]("r1", {})
+
+    # The RPC itself succeeded -> _ok envelope; the failure reason rides inside.
+    assert "result" in resp
+    assert "error" not in resp
+    assert resp["result"] == {"ok": False, "reason": "self_check_timeout"}
+
+
+def test_systemcheck_not_ready_matrix_still_surfaces_as_report(monkeypatch):
+    not_ready = dict(_READY_MATRIX, verdict="NOT-READY", ready=False)
+    runner, _ = _make_self_check_runner(not_ready)
+    monkeypatch.setattr(server, "_self_check_runner", runner)
+
+    resp = server._methods["conductor.systemcheck"]("r1", {})
+
+    # A NOT-READY verdict is a VALID report, not a failure.
+    assert resp["result"]["ok"] is True
+    assert resp["result"]["report"]["verdict"] == "NOT-READY"
+
+
+def test_systemcheck_timeout_maps_to_reason(monkeypatch):
+    import subprocess
+
+    def _boom(argv, timeout):  # noqa: ANN001
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
+
+    monkeypatch.setattr(server, "_self_check_runner", _boom)
+
+    resp = server._methods["conductor.systemcheck"]("r1", {})
+
+    assert resp["result"]["ok"] is False
+    assert resp["result"]["reason"] == "self_check_timeout"
+
+
+def test_systemcheck_unexpected_exception_does_not_leak(monkeypatch):
+    def _boom(argv, timeout):  # noqa: ANN001
+        raise RuntimeError("kaboom /secret/path/creds")
+
+    monkeypatch.setattr(server, "_self_check_runner", _boom)
+
+    resp = server._methods["conductor.systemcheck"]("r1", {})
+
+    assert resp["result"]["ok"] is False
+    assert resp["result"]["reason"] == "self_check_error"
+    assert "secret" not in json.dumps(resp["result"])
+    assert "kaboom" not in json.dumps(resp["result"])
+
+
+# ── default self-check runner: multi-line JSON + exit-code semantics ──
+
+
+def test_self_check_runner_parses_multiline_pretty_json(monkeypatch):
+    pretty = json.dumps(_READY_MATRIX, indent=2) + "\n"
+
+    def _fake_run(argv, capture_output, text, timeout):  # noqa: ANN001
+        assert isinstance(argv, list)
+        return _FakeCompleted(stdout=pretty, returncode=0)
+
+    monkeypatch.setattr(server.subprocess, "run", _fake_run)
+
+    result = server._default_self_check_runner(
+        [server._resolve_node(), "/x/self-check.mjs", "--json"], timeout=30
+    )
+
+    assert result["verdict"] == "READY"
+    assert result["schema"] == "developer_os_self_check_v1"
+
+
+def test_self_check_runner_keeps_not_ready_report_despite_nonzero_exit(monkeypatch):
+    not_ready = dict(_READY_MATRIX, verdict="NOT-READY", ready=False)
+    pretty = json.dumps(not_ready, indent=2) + "\n"
+
+    def _fake_run(argv, capture_output, text, timeout):  # noqa: ANN001
+        # The real runner exits 1 on NOT-READY, but the report is still valid.
+        return _FakeCompleted(stdout=pretty, returncode=1)
+
+    monkeypatch.setattr(server.subprocess, "run", _fake_run)
+
+    result = server._default_self_check_runner(["node", "s.mjs", "--json"], timeout=30)
+
+    assert result["verdict"] == "NOT-READY"
+    assert "reason" not in result
+
+
+def test_self_check_runner_tolerates_leading_warmup_noise(monkeypatch):
+    one_line = json.dumps(_READY_MATRIX)
+
+    def _fake_run(argv, capture_output, text, timeout):  # noqa: ANN001
+        return _FakeCompleted(stdout="warming up\n\n" + one_line + "\n", returncode=0)
+
+    monkeypatch.setattr(server.subprocess, "run", _fake_run)
+
+    result = server._default_self_check_runner(["node", "s.mjs", "--json"], timeout=30)
+
+    assert result["verdict"] == "READY"
+
+
+def test_self_check_runner_unparseable_returns_reason(monkeypatch):
+    def _fake_run(argv, capture_output, text, timeout):  # noqa: ANN001
+        return _FakeCompleted(stdout="not json at all\n", returncode=1)
+
+    monkeypatch.setattr(server.subprocess, "run", _fake_run)
+
+    result = server._default_self_check_runner(["node", "s.mjs", "--json"], timeout=30)
+
+    assert result["ok"] is False
+    assert result["reason"] == "self_check_nonzero"
+
+
+def test_self_check_runner_empty_returns_reason(monkeypatch):
+    def _fake_run(argv, capture_output, text, timeout):  # noqa: ANN001
+        return _FakeCompleted(stdout="   \n\n", returncode=1)
+
+    monkeypatch.setattr(server.subprocess, "run", _fake_run)
+
+    result = server._default_self_check_runner(["node", "s.mjs", "--json"], timeout=30)
+
+    assert result["ok"] is False
+    assert result["reason"] == "self_check_empty"
+
+
+def test_self_check_runner_timeout_returns_reason(monkeypatch):
+    import subprocess
+
+    def _fake_run(argv, capture_output, text, timeout):  # noqa: ANN001
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
+
+    monkeypatch.setattr(server.subprocess, "run", _fake_run)
+
+    result = server._default_self_check_runner(["node", "s.mjs", "--json"], timeout=30)
+
+    assert result["ok"] is False
+    assert result["reason"] == "self_check_timeout"
+
+
+def test_self_check_runner_not_found_returns_reason(monkeypatch):
+    def _fake_run(argv, capture_output, text, timeout):  # noqa: ANN001
+        raise FileNotFoundError("no node here")
+
+    monkeypatch.setattr(server.subprocess, "run", _fake_run)
+
+    result = server._default_self_check_runner(["node", "s.mjs", "--json"], timeout=30)
+
+    assert result["ok"] is False
+    assert result["reason"] == "self_check_not_found"
+
+
+def test_run_self_check_builds_argv_list_with_json(monkeypatch):
+    captured = {}
+
+    def _runner(argv, timeout):  # noqa: ANN001
+        captured["argv"] = argv
+        captured["timeout"] = timeout
+        return _READY_MATRIX
+
+    monkeypatch.setattr(server, "_self_check_runner", _runner)
+
+    server._run_self_check()
+
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    assert len(argv) == 3
+    assert argv[2] == "--json"
+    assert captured["timeout"] == 30
+
+
+def test_run_self_check_honors_env_runner_path(monkeypatch):
+    captured = {}
+
+    def _runner(argv, timeout):  # noqa: ANN001
+        captured["argv"] = argv
+        return _READY_MATRIX
+
+    monkeypatch.setattr(server, "_self_check_runner", _runner)
+    monkeypatch.setenv("HERMES_SELF_CHECK_RUNNER", "/custom/self-check.mjs")
+
+    server._run_self_check()
+
+    assert captured["argv"][1] == "/custom/self-check.mjs"

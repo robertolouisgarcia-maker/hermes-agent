@@ -1056,6 +1056,30 @@ export const en: Translations = {
       release_ready: 'Release ready',
       blocked: 'Blocked',
       unknown: 'Unknown'
+    },
+    system: {
+      title: 'System health',
+      verdict: 'Verdict',
+      verdictReady: 'Ready',
+      verdictDegraded: 'Degraded',
+      verdictNotReady: 'Not ready',
+      verdictUnknown: 'Unknown',
+      summary: (live, total, floorsHeld, floorsTotal) =>
+        `${live}/${total} capabilities live - ${floorsHeld}/${floorsTotal} floors hold`,
+      capabilities: 'Capabilities',
+      noCapabilities: 'No capabilities reported.',
+      floors: 'Governance floors',
+      noFloors: 'No governance floors reported.',
+      holds: 'Holds',
+      breached: 'Breached',
+      statusLive: 'Live',
+      statusDegraded: 'Degraded',
+      statusAbsent: 'Absent',
+      loading: 'Running self-check...',
+      error: 'Could not run self-check',
+      errorDesc: 'The gateway could not reach the Developer-OS self-check. It will retry automatically.',
+      empty: 'No self-check yet',
+      emptyDesc: 'The Developer-OS self-check has not reported a readiness matrix yet. It will appear here once one is published.'
     }
   },
 

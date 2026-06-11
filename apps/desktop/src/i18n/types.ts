@@ -802,6 +802,29 @@ export interface Translations {
     refProofBundle: string
     refHandoff: string
     states: Record<string, string>
+    system: {
+      title: string
+      verdict: string
+      verdictReady: string
+      verdictDegraded: string
+      verdictNotReady: string
+      verdictUnknown: string
+      summary: (live: number, total: number, floorsHeld: number, floorsTotal: number) => string
+      capabilities: string
+      noCapabilities: string
+      floors: string
+      noFloors: string
+      holds: string
+      breached: string
+      statusLive: string
+      statusDegraded: string
+      statusAbsent: string
+      loading: string
+      error: string
+      errorDesc: string
+      empty: string
+      emptyDesc: string
+    }
   }
 
   artifacts: {

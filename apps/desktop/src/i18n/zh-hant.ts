@@ -1155,6 +1155,30 @@ export const zhHant = defineLocale({
       release_ready: '可發布',
       blocked: '已阻擋',
       unknown: '未知'
+    },
+    system: {
+      title: '系統健康',
+      verdict: '判定',
+      verdictReady: '就緒',
+      verdictDegraded: '降級',
+      verdictNotReady: '未就緒',
+      verdictUnknown: '未知',
+      summary: (live, total, floorsHeld, floorsTotal) =>
+        `能力 ${live}/${total} 運行中 - 底線 ${floorsHeld}/${floorsTotal} 守住`,
+      capabilities: '能力',
+      noCapabilities: '未報告任何能力。',
+      floors: '治理底線',
+      noFloors: '未報告任何治理底線。',
+      holds: '守住',
+      breached: '已突破',
+      statusLive: '運行',
+      statusDegraded: '降級',
+      statusAbsent: '缺失',
+      loading: '正在執行自我檢查…',
+      error: '無法執行自我檢查',
+      errorDesc: '閘道無法連線到 Developer-OS 自我檢查，將自動重試。',
+      empty: '尚無自我檢查',
+      emptyDesc: 'Developer-OS 自我檢查尚未報告就緒矩陣。一旦發布，便會在此處顯示。'
     }
   },
 

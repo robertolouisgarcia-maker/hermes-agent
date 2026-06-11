@@ -53,6 +53,37 @@ function cockpitFor(missionId: string) {
   }
 }
 
+function readyMatrix() {
+  return {
+    report: {
+      schema: 'developer_os_self_check_v1',
+      ready: true,
+      verdict: 'READY',
+      capabilities: [
+        { name: 'CAP-1', status: 'live', evidence: 'conductor dry-run ready', detail: 'd1' },
+        { name: 'CAP-7', status: 'degraded', evidence: 'gemini cli missing', detail: 'd7' },
+        { name: 'CAP-9', status: 'absent', evidence: 'receipt probe threw', detail: 'd9' }
+      ],
+      governanceFloors: [
+        { floor: 'FLOOR-1', holds: true, evidence: 'data boundary local-only' },
+        { floor: 'FLOOR-2', holds: false, evidence: 'subscription billing breached' }
+      ],
+      summary: { capabilitiesLive: 1, floorsHeld: 1 },
+      generatedNote: 'in-process, dry-run only.'
+    }
+  }
+}
+
+function notReadyMatrix() {
+  return {
+    report: {
+      ...readyMatrix().report,
+      ready: false,
+      verdict: 'NOT-READY'
+    }
+  }
+}
+
 function renderConductor(requestGateway: (method: string, params?: Record<string, unknown>) => Promise<unknown>) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } }
@@ -210,5 +241,149 @@ describe('ConductorView', () => {
     await waitFor(() => {
       expect(requestGateway).toHaveBeenCalledWith('conductor.cockpit.get', expect.objectContaining({ missionId: 'mission-bravo' }))
     })
+  })
+
+  // ── System-health pane (cockpit home when no mission is selected) ──
+
+  it('renders the system-health verdict + capability rows + floor rows from the self-check', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: [] }
+      }
+
+      if (method === 'conductor.systemcheck') {
+        return readyMatrix()
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+
+    // The cockpit home queries the self-check.
+    await waitFor(() => {
+      expect(requestGateway).toHaveBeenCalledWith('conductor.systemcheck', expect.any(Object))
+    })
+
+    // Verdict header (READY → "Ready"), with the system-health title.
+    await waitFor(() => {
+      expect(screen.getByText('System health')).toBeTruthy()
+    })
+    expect(screen.getByText('Ready')).toBeTruthy()
+
+    // A capability row per capability: id + evidence + the status word.
+    expect(screen.getByText('CAP-1')).toBeTruthy()
+    expect(screen.getByText('CAP-7')).toBeTruthy()
+    expect(screen.getByText('CAP-9')).toBeTruthy()
+    expect(screen.getByText('conductor dry-run ready')).toBeTruthy()
+    // Status words for live / degraded / absent are all present.
+    expect(screen.getByText('Live')).toBeTruthy()
+    // Degraded appears for the verdict-less capability AND nowhere else here.
+    expect(screen.getByText('Absent')).toBeTruthy()
+
+    // A floor row per governance floor: id + holds/breached.
+    expect(screen.getByText('FLOOR-1')).toBeTruthy()
+    expect(screen.getByText('FLOOR-2')).toBeTruthy()
+    expect(screen.getByText('Holds')).toBeTruthy()
+    expect(screen.getByText('Breached')).toBeTruthy()
+    expect(screen.getByText('data boundary local-only')).toBeTruthy()
+  })
+
+  it('shows the destructive verdict label for a NOT-READY matrix', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: [] }
+      }
+
+      if (method === 'conductor.systemcheck') {
+        return notReadyMatrix()
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+
+    await waitFor(() => {
+      expect(screen.getByText('Not ready')).toBeTruthy()
+    })
+  })
+
+  it('shows the system-health error state when the self-check returns ok:false', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: [] }
+      }
+
+      if (method === 'conductor.systemcheck') {
+        return { ok: false, reason: 'self_check_timeout' }
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+
+    await waitFor(() => {
+      expect(screen.getByText('Could not run self-check')).toBeTruthy()
+    })
+  })
+
+  it('shows the loader while the self-check is pending', async () => {
+    let resolveSelfCheck: ((value: unknown) => void) | undefined
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: [] }
+      }
+
+      if (method === 'conductor.systemcheck') {
+        return new Promise(resolve => {
+          resolveSelfCheck = resolve
+        })
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+
+    // The self-check promise never resolves yet → the Loader shows (its label
+    // rides as the accessible name on the role="status" element).
+    await waitFor(() => {
+      expect(screen.getByRole('status', { name: 'Running self-check...' })).toBeTruthy()
+    })
+
+    // Resolve so react-query settles and the test tears down cleanly.
+    resolveSelfCheck?.(readyMatrix())
+  })
+
+  it('renders system health (not the mission detail) when there are missions but none is selected', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: MISSIONS }
+      }
+
+      if (method === 'conductor.systemcheck') {
+        return readyMatrix()
+      }
+
+      if (method === 'conductor.cockpit.get') {
+        return cockpitFor('mission-alpha')
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+
+    // With missions present, the first lane auto-selects → the detail pane
+    // binds to it and the system-health title is NOT shown in the main pane.
+    await waitFor(() => {
+      expect(requestGateway).toHaveBeenCalledWith('conductor.cockpit.get', expect.objectContaining({ missionId: 'mission-alpha' }))
+    })
+    await waitFor(() => {
+      expect(screen.getByText('fin')).toBeTruthy()
+    })
+    expect(screen.queryByText('System health')).toBeNull()
   })
 })

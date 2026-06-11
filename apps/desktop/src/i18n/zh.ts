@@ -1242,6 +1242,30 @@ export const zh: Translations = {
       release_ready: '可发布',
       blocked: '已阻塞',
       unknown: '未知'
+    },
+    system: {
+      title: '系统健康',
+      verdict: '判定',
+      verdictReady: '就绪',
+      verdictDegraded: '降级',
+      verdictNotReady: '未就绪',
+      verdictUnknown: '未知',
+      summary: (live, total, floorsHeld, floorsTotal) =>
+        `能力 ${live}/${total} 运行中 - 底线 ${floorsHeld}/${floorsTotal} 守住`,
+      capabilities: '能力',
+      noCapabilities: '未报告任何能力。',
+      floors: '治理底线',
+      noFloors: '未报告任何治理底线。',
+      holds: '守住',
+      breached: '已突破',
+      statusLive: '运行',
+      statusDegraded: '降级',
+      statusAbsent: '缺失',
+      loading: '正在运行自检…',
+      error: '无法运行自检',
+      errorDesc: '网关无法连接到 Developer-OS 自检，将自动重试。',
+      empty: '尚无自检',
+      emptyDesc: 'Developer-OS 自检尚未报告就绪矩阵。一旦发布，便会在此处显示。'
     }
   },
 

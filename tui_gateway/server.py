@@ -178,6 +178,7 @@ _LONG_HANDLERS = frozenset(
         "conductor.cockpit.get",
         "conductor.missions.list",
         "conductor.receipts.tail",
+        "conductor.systemcheck",
         "plugins.manage",
         "session.branch",
         "session.compress",
@@ -6265,6 +6266,135 @@ def _(rid, params: dict) -> dict:
         },
     )
     return _ok(rid, result)
+
+
+# ── Methods: conductor self-check (read-only, SAFE — no spawn/spend/effect) ──
+#
+# Surfaces the Developer-OS self-check readiness matrix in the cockpit so one
+# glance shows the whole machine is healthy. The self-check is SAFE BY DESIGN:
+# it dry-runs every capability/floor probe in-process with mock runners — no
+# spawn, no execute, no metered spend, no canonical writes. This sibling of the
+# cockpit proxy keeps the SAME posture: ARGV LIST (never shell=True), no leaked
+# stderr/argv/paths, never raises; on any failure it returns a
+# {"ok": False, "reason": "self_check_<kind>"} envelope.
+
+_DEFAULT_SELF_CHECK_RUNNER = (
+    "/Users/robert/Projects/personal-hermes-os/scripts/"
+    "run-developer-os-self-check-local.mjs"
+)
+_SELF_CHECK_TIMEOUT_S = 30
+
+
+def _resolve_self_check_runner_path() -> str:
+    return os.environ.get("HERMES_SELF_CHECK_RUNNER", _DEFAULT_SELF_CHECK_RUNNER)
+
+
+def _default_self_check_runner(argv: list[str], timeout: int) -> dict:
+    """Real runner: subprocess-invoke the PH Node self-check with --json.
+
+    *argv* is an ARGV LIST ([node, script, "--json"]); never shell=True, so
+    there is no shell-injection surface. The runner pretty-prints its v1 report
+    (multi-line JSON) to stdout and exits non-zero ONLY on a NOT-READY verdict —
+    which is still a VALID report we want to render. So the parse order is:
+      1. parse the ENTIRE stdout as JSON (the pretty-printed report), else
+      2. parse the LAST non-empty stdout line as JSON (warm-up-noise tolerant).
+    A parseable report wins regardless of exit code (NOT-READY exits 1 but is a
+    legitimate matrix). Only when nothing parses do we consult the exit code.
+    On timeout / not-found / empty / unparseable / nonzero-without-report this
+    returns {"ok": False, "reason": "self_check_<kind>"} and NEVER includes
+    stderr or the argv (they could carry paths/creds).
+    """
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "self_check_timeout"}
+    except FileNotFoundError:
+        return {"ok": False, "reason": "self_check_not_found"}
+    except Exception:
+        return {"ok": False, "reason": "self_check_error"}
+
+    stdout = completed.stdout or ""
+    parsed = _parse_self_check_stdout(stdout)
+    if parsed is not None:
+        # A valid report wins over a non-zero exit (NOT-READY exits 1 by design).
+        return parsed
+
+    lines = [ln for ln in stdout.splitlines() if ln.strip()]
+    if not lines:
+        return {"ok": False, "reason": "self_check_empty"}
+    if completed.returncode != 0:
+        return {"ok": False, "reason": "self_check_nonzero"}
+    return {"ok": False, "reason": "self_check_parse"}
+
+
+def _parse_self_check_stdout(stdout: str) -> Optional[dict]:
+    """Return the report dict from *stdout*, or None if nothing parses.
+
+    Tries the whole stdout first (the runner pretty-prints multi-line JSON),
+    then the last non-empty line (tolerates leading warm-up noise). Returns a
+    dict only; non-dict JSON is treated as unparseable.
+    """
+    candidate = stdout.strip()
+    if candidate:
+        try:
+            value = json.loads(candidate)
+            if isinstance(value, dict):
+                return value
+        except (ValueError, TypeError):
+            pass
+    lines = [ln for ln in stdout.splitlines() if ln.strip()]
+    if lines:
+        try:
+            value = json.loads(lines[-1])
+            if isinstance(value, dict):
+                return value
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+# Injectable hook so tests can substitute a fake runner without spawning node.
+_self_check_runner = _default_self_check_runner
+
+
+def _run_self_check() -> dict:
+    """Build the ARGV LIST and invoke the (injectable) self-check runner.
+
+    Always returns a dict (the parsed matrix, or a self_check_* reason); never
+    raises and never uses shell=True.
+    """
+    argv = [
+        _resolve_node(),
+        _resolve_self_check_runner_path(),
+        "--json",
+    ]
+    try:
+        return _self_check_runner(argv, timeout=_SELF_CHECK_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "self_check_timeout"}
+    except FileNotFoundError:
+        return {"ok": False, "reason": "self_check_not_found"}
+    except Exception:
+        return {"ok": False, "reason": "self_check_error"}
+
+
+@method("conductor.systemcheck")
+def _(rid, params: dict) -> dict:
+    """Run the PH Developer-OS self-check and return its readiness matrix.
+
+    Wraps a parsed matrix as {"ok": True, "report": <matrix>}; a runner failure
+    rides back as the {"ok": False, "reason": "self_check_*"} envelope (the RPC
+    itself still succeeds so the renderer can show an ErrorState).
+    """
+    result = _run_self_check()
+    if isinstance(result, dict) and result.get("ok") is False:
+        return _ok(rid, result)
+    return _ok(rid, {"ok": True, "report": result})
 
 
 # ── Methods: config ──────────────────────────────────────────────────

@@ -7,7 +7,7 @@ import { StatusDot, type StatusTone } from '@/components/status-dot'
 import { ErrorState } from '@/components/ui/error-state'
 import { Loader } from '@/components/ui/loader'
 import { type Translations, useI18n } from '@/i18n'
-import { GitBranch, Globe, type IconComponent, Lock, Package, SteeringWheel } from '@/lib/icons'
+import { Activity, GitBranch, Globe, type IconComponent, Lock, Package, SteeringWheel, Zap } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { $activeMissionId, setActiveMission } from '@/store/conductor'
 
@@ -22,6 +22,12 @@ import { EmptyState, ListRow, SectionHeading } from '../settings/primitives'
 const POLL_INTERVAL_MS = 3000
 
 const MISSIONS_LIMIT = 50
+
+// The system-health pane is the cockpit home: a glance proves the whole machine
+// is healthy. The PH Developer-OS self-check is SAFE (no spawn/spend/effect by
+// design), so polling it is cheap — a slower cadence than the live lanes is
+// plenty for a readiness matrix that only changes when the fleet wiring does.
+const SYSTEMCHECK_INTERVAL_MS = 10000
 
 // One JSON-RPC call into the gateway, which proxies the PH Conductor cockpit
 // tools. Mirrors how every other overlay reaches the gateway.
@@ -101,6 +107,63 @@ interface CockpitProjection {
 
 interface ConductorCockpitResponse extends GatewayResult {
   projection?: CockpitProjection
+}
+
+// ── Developer-OS self-check (system-health) shapes ───────────────────
+// The gateway wraps the parsed matrix as { ok: true, report }. The report is
+// the developer_os_self_check_v1 matrix the cockpit home renders. Every field
+// is optional so a partial/early matrix still renders without throwing.
+type SelfCheckVerdict = 'READY' | 'DEGRADED' | 'NOT-READY'
+type CapabilityStatus = 'live' | 'degraded' | 'absent'
+
+interface SelfCheckCapability {
+  name: string
+  status?: CapabilityStatus
+  evidence?: string
+  detail?: string
+}
+
+interface SelfCheckFloor {
+  floor: string
+  holds?: boolean
+  evidence?: string
+}
+
+interface SelfCheckReport {
+  schema?: string
+  ready?: boolean
+  verdict?: SelfCheckVerdict | string
+  capabilities?: SelfCheckCapability[]
+  governanceFloors?: SelfCheckFloor[]
+  summary?: Record<string, number>
+  generatedNote?: string
+}
+
+interface ConductorSystemcheckResponse extends GatewayResult {
+  report?: SelfCheckReport
+}
+
+// Verdict → StatusDot tone. READY reads as success (good), DEGRADED as a
+// warning, NOT-READY as destructive, anything unknown as a muted pip.
+const VERDICT_TONE: Record<string, StatusTone> = {
+  READY: 'good',
+  DEGRADED: 'warn',
+  'NOT-READY': 'bad'
+}
+
+function verdictTone(verdict: string | undefined): StatusTone {
+  return (verdict ? VERDICT_TONE[verdict] : undefined) ?? 'muted'
+}
+
+// Capability status → tone. live=good, degraded=warn, absent=bad, else muted.
+const CAPABILITY_TONE: Record<string, StatusTone> = {
+  live: 'good',
+  degraded: 'warn',
+  absent: 'bad'
+}
+
+function capabilityTone(status: string | undefined): StatusTone {
+  return (status ? CAPABILITY_TONE[status] : undefined) ?? 'muted'
 }
 
 // State → StatusDot tone. release_ready reads as success, in-flight states
@@ -208,6 +271,28 @@ export function ConductorView({ onClose, requestGateway }: ConductorViewProps) {
     [missions, selectedMissionId]
   )
 
+  // The system-health matrix is the cockpit home. It is independent of any
+  // mission selection (global readiness), so it polls on its own slow cadence
+  // and renders in the main pane whenever no lane is bound to the detail view.
+  const systemcheckQuery = useQuery({
+    queryKey: ['conductor', 'systemcheck'],
+    queryFn: async () => {
+      const res = await requestGateway<ConductorSystemcheckResponse>('conductor.systemcheck', {})
+
+      // Same {ok:false} envelope as the cockpit tools: throw so react-query
+      // routes it to the system-health ErrorState rather than a blank pane.
+      if (res && res.ok === false) {
+        throw new Error(res.reason ?? 'systemcheck_unavailable')
+      }
+
+      return res
+    },
+    refetchInterval: SYSTEMCHECK_INTERVAL_MS
+  })
+
+  // No lane is bound to the detail pane: the cockpit home is system health.
+  const showSystemHealth = !selectedMissionId
+
   return (
     <OverlayView closeLabel={c.close} onClose={onClose}>
       <OverlaySplitLayout>
@@ -240,16 +325,25 @@ export function ConductorView({ onClose, requestGateway }: ConductorViewProps) {
         </OverlaySidebar>
 
         <OverlayMain>
-          <MissionDetail
-            c={c}
-            cockpit={cockpitQuery.data?.projection}
-            isError={cockpitQuery.isError}
-            isLoading={cockpitQuery.isLoading && !!selectedMissionId}
-            mission={selectedMission}
-            missionsError={missionsQuery.isError}
-            missionsLoading={missionsQuery.isPending}
-            noMissions={!missionsQuery.isPending && !missionsQuery.isError && missions.length === 0}
-          />
+          {showSystemHealth ? (
+            <SystemHealth
+              c={c}
+              isError={systemcheckQuery.isError}
+              isLoading={systemcheckQuery.isPending}
+              report={systemcheckQuery.data?.report}
+            />
+          ) : (
+            <MissionDetail
+              c={c}
+              cockpit={cockpitQuery.data?.projection}
+              isError={cockpitQuery.isError}
+              isLoading={cockpitQuery.isLoading && !!selectedMissionId}
+              mission={selectedMission}
+              missionsError={missionsQuery.isError}
+              missionsLoading={missionsQuery.isPending}
+              noMissions={!missionsQuery.isPending && !missionsQuery.isError && missions.length === 0}
+            />
+          )}
         </OverlayMain>
       </OverlaySplitLayout>
     </OverlayView>
@@ -262,6 +356,153 @@ function iconForRealm(realmId: string | undefined): IconComponent {
   }
 
   return Globe
+}
+
+// The cockpit home: the Developer-OS self-check readiness matrix. One glance
+// proves the whole machine is healthy — a verdict header, every capability with
+// its live/degraded/absent pip + evidence, and every governance floor with a
+// holds/breached pip. Composed entirely from existing primitives + tokens.
+function SystemHealth({
+  c,
+  isError,
+  isLoading,
+  report
+}: {
+  c: Translations['conductor']
+  isError: boolean
+  isLoading: boolean
+  report?: SelfCheckReport
+}) {
+  const s = c.system
+
+  if (isError) {
+    return (
+      <div className="grid min-h-48 place-items-center">
+        <ErrorState description={s.errorDesc} title={s.error} />
+      </div>
+    )
+  }
+
+  // Spin only while genuinely fetching with no prior matrix.
+  if (isLoading) {
+    return (
+      <div className="grid min-h-48 place-items-center">
+        <Loader label={s.loading} />
+      </div>
+    )
+  }
+
+  // Settled but the tool returned no matrix: an empty state, not a spinner.
+  if (!report) {
+    return <EmptyState description={s.emptyDesc} title={s.empty} />
+  }
+
+  const capabilities = report.capabilities ?? []
+  const floors = report.governanceFloors ?? []
+  const verdict = report.verdict
+  const verdictLabel = verdictText(verdict, s)
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto w-full max-w-2xl">
+        <SectionHeading icon={Activity} title={s.title} />
+
+        <div className="flex flex-col">
+          <ListRow
+            action={
+              <span className="inline-flex items-center gap-2 text-[length:var(--conversation-text-font-size)] text-foreground sm:justify-self-end">
+                <StatusDot tone={verdictTone(verdict)} />
+                {verdictLabel}
+              </span>
+            }
+            description={report.summary ? s.summary(report.summary.capabilitiesLive ?? 0, capabilities.length, report.summary.floorsHeld ?? 0, floors.length) : undefined}
+            title={s.verdict}
+          />
+        </div>
+
+        <SectionHeading
+          icon={Zap}
+          meta={capabilities.length ? String(capabilities.length) : undefined}
+          title={s.capabilities}
+        />
+        {capabilities.length === 0 ? (
+          <p className="py-2 text-xs text-muted-foreground">{s.noCapabilities}</p>
+        ) : (
+          <div className="flex flex-col">
+            {capabilities.map(capability => (
+              <ListRow
+                action={
+                  <span className="inline-flex items-center gap-2 text-[length:var(--conversation-text-font-size)] text-foreground sm:justify-self-end">
+                    <StatusDot tone={capabilityTone(capability.status)} />
+                    {capabilityStatusText(capability.status, s)}
+                  </span>
+                }
+                description={capability.evidence}
+                key={capability.name}
+                title={<span className="font-mono">{capability.name}</span>}
+              />
+            ))}
+          </div>
+        )}
+
+        <SectionHeading
+          icon={Lock}
+          meta={floors.length ? String(floors.length) : undefined}
+          title={s.floors}
+        />
+        {floors.length === 0 ? (
+          <p className="py-2 pb-6 text-xs text-muted-foreground">{s.noFloors}</p>
+        ) : (
+          <div className="mb-6 flex flex-col">
+            {floors.map(floor => (
+              <ListRow
+                action={
+                  <span className="inline-flex items-center gap-2 text-[length:var(--conversation-text-font-size)] text-foreground sm:justify-self-end">
+                    <StatusDot tone={floor.holds ? 'good' : 'bad'} />
+                    {floor.holds ? s.holds : s.breached}
+                  </span>
+                }
+                description={floor.evidence}
+                key={floor.floor}
+                title={<span className="font-mono">{floor.floor}</span>}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Verdict → localized label. READY/DEGRADED/NOT-READY are known; an unknown
+// verdict falls back to the raw string (never blank).
+function verdictText(verdict: string | undefined, s: Translations['conductor']['system']): string {
+  if (verdict === 'READY') {
+    return s.verdictReady
+  }
+  if (verdict === 'DEGRADED') {
+    return s.verdictDegraded
+  }
+  if (verdict === 'NOT-READY') {
+    return s.verdictNotReady
+  }
+
+  return verdict ?? s.verdictUnknown
+}
+
+// Capability status → localized word. live/degraded/absent known; else raw.
+function capabilityStatusText(status: string | undefined, s: Translations['conductor']['system']): string {
+  if (status === 'live') {
+    return s.statusLive
+  }
+  if (status === 'degraded') {
+    return s.statusDegraded
+  }
+  if (status === 'absent') {
+    return s.statusAbsent
+  }
+
+  return status ?? s.verdictUnknown
 }
 
 function MissionDetail({

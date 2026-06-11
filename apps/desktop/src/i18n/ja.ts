@@ -1190,6 +1190,30 @@ export const ja = defineLocale({
       release_ready: 'リリース可能',
       blocked: 'ブロック',
       unknown: '不明'
+    },
+    system: {
+      title: 'システムヘルス',
+      verdict: '判定',
+      verdictReady: '準備完了',
+      verdictDegraded: '機能低下',
+      verdictNotReady: '準備未完了',
+      verdictUnknown: '不明',
+      summary: (live, total, floorsHeld, floorsTotal) =>
+        `ケイパビリティ ${live}/${total} 稼働中 - フロア ${floorsHeld}/${floorsTotal} 維持`,
+      capabilities: 'ケイパビリティ',
+      noCapabilities: '報告されたケイパビリティはありません。',
+      floors: 'ガバナンスフロア',
+      noFloors: '報告されたガバナンスフロアはありません。',
+      holds: '維持',
+      breached: '違反',
+      statusLive: '稼働',
+      statusDegraded: '低下',
+      statusAbsent: '欠如',
+      loading: 'セルフチェックを実行中…',
+      error: 'セルフチェックを実行できませんでした',
+      errorDesc: 'ゲートウェイが Developer-OS セルフチェックに接続できませんでした。自動的に再試行します。',
+      empty: 'まだセルフチェックはありません',
+      emptyDesc: 'Developer-OS セルフチェックはまだ準備状況マトリクスを報告していません。報告されるとここに表示されます。'
     }
   },
 
