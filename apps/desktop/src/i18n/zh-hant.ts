@@ -1121,6 +1121,43 @@ export const zhHant = defineLocale({
     createAction: '建立排程工作'
   },
 
+  conductor: {
+    title: '指揮台',
+    close: '關閉指揮台',
+    loading: '正在載入任務…',
+    cockpitLoading: '正在載入駕駛艙…',
+    emptyLanes: '沒有進行中的任務',
+    emptyDesc: '當指揮台將任務租給執行器時，會在此處顯示為一條泳道。選擇一條泳道即可查看其駕駛艙。',
+    lanesError: '無法載入任務',
+    lanesErrorDesc: '閘道無法連線到指揮台駕駛艙，將自動重試。',
+    cockpitError: '無法載入駕駛艙',
+    cockpitErrorDesc: '此任務的駕駛艙投影無法使用，將自動重試。',
+    noProjection: '尚無投影',
+    noProjectionDesc: '指揮台尚未為此任務發布駕駛艙投影。一旦發布，便會在此處顯示。',
+    fieldState: '狀態',
+    fieldPriority: '優先順序',
+    fieldRealm: '領域',
+    fieldRepo: '儲存庫系列',
+    fieldSeverity: '嚴重程度',
+    fieldOwnerGoal: '擁有者目標',
+    controlsTitle: '控制項',
+    noControls: '暫無可用的控制項。',
+    ownerApproval: '需要擁有者核准',
+    refsTitle: '參照',
+    noRefs: '尚無參照。',
+    refValidationContract: '驗證合約',
+    refProofBundle: '證明包',
+    refHandoff: '交接',
+    states: {
+      working: '進行中',
+      leased: '已租用',
+      validating: '驗證中',
+      release_ready: '可發布',
+      blocked: '已阻擋',
+      unknown: '未知'
+    }
+  },
+
   artifacts: {
     search: '搜尋成品…',
     refresh: '重新整理成品',

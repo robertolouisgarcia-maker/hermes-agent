@@ -1022,6 +1022,43 @@ export const en: Translations = {
     createAction: 'Create cron'
   },
 
+  conductor: {
+    title: 'Conductor',
+    close: 'Close conductor',
+    loading: 'Loading missions...',
+    cockpitLoading: 'Loading cockpit...',
+    emptyLanes: 'No active missions',
+    emptyDesc: 'When the Conductor leases a mission to a runner it appears here as a lane. Pick a lane to watch its cockpit.',
+    lanesError: 'Could not load missions',
+    lanesErrorDesc: 'The gateway could not reach the Conductor cockpit. It will retry automatically.',
+    cockpitError: 'Could not load cockpit',
+    cockpitErrorDesc: 'The cockpit projection for this mission is unavailable. It will retry automatically.',
+    noProjection: 'No projection yet',
+    noProjectionDesc: 'The Conductor has not emitted a cockpit projection for this mission yet. It will appear here once one is published.',
+    fieldState: 'State',
+    fieldPriority: 'Priority',
+    fieldRealm: 'Realm',
+    fieldRepo: 'Repo family',
+    fieldSeverity: 'Severity',
+    fieldOwnerGoal: 'Owner goal',
+    controlsTitle: 'Controls',
+    noControls: 'No controls available.',
+    ownerApproval: 'Requires owner approval',
+    refsTitle: 'Refs',
+    noRefs: 'No refs yet.',
+    refValidationContract: 'Validation contract',
+    refProofBundle: 'Proof bundle',
+    refHandoff: 'Handoff',
+    states: {
+      working: 'Working',
+      leased: 'Leased',
+      validating: 'Validating',
+      release_ready: 'Release ready',
+      blocked: 'Blocked',
+      unknown: 'Unknown'
+    }
+  },
+
   artifacts: {
     search: 'Search artifacts...',
     refresh: 'Refresh artifacts',

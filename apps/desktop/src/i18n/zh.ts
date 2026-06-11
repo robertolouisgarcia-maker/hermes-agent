@@ -1208,6 +1208,43 @@ export const zh: Translations = {
     createAction: '创建定时任务'
   },
 
+  conductor: {
+    title: '指挥台',
+    close: '关闭指挥台',
+    loading: '正在加载任务…',
+    cockpitLoading: '正在加载驾驶舱…',
+    emptyLanes: '没有进行中的任务',
+    emptyDesc: '当指挥台将任务租给执行器时，会在此处显示为一条泳道。选择一条泳道即可查看其驾驶舱。',
+    lanesError: '无法加载任务',
+    lanesErrorDesc: '网关无法连接到指挥台驾驶舱，将自动重试。',
+    cockpitError: '无法加载驾驶舱',
+    cockpitErrorDesc: '该任务的驾驶舱投影不可用，将自动重试。',
+    noProjection: '尚无投影',
+    noProjectionDesc: '指挥台尚未为该任务发布驾驶舱投影。一旦发布，便会在此处显示。',
+    fieldState: '状态',
+    fieldPriority: '优先级',
+    fieldRealm: '领域',
+    fieldRepo: '仓库系列',
+    fieldSeverity: '严重程度',
+    fieldOwnerGoal: '所有者目标',
+    controlsTitle: '控制项',
+    noControls: '暂无可用的控制项。',
+    ownerApproval: '需要所有者批准',
+    refsTitle: '引用',
+    noRefs: '尚无引用。',
+    refValidationContract: '验证合约',
+    refProofBundle: '证明包',
+    refHandoff: '交接',
+    states: {
+      working: '进行中',
+      leased: '已租用',
+      validating: '校验中',
+      release_ready: '可发布',
+      blocked: '已阻塞',
+      unknown: '未知'
+    }
+  },
+
   artifacts: {
     search: '搜索产物…',
     refresh: '刷新产物',

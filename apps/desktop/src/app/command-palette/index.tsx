@@ -29,6 +29,7 @@ import {
   Plus,
   Settings,
   Settings2,
+  SteeringWheel,
   Sun,
   Users,
   Wrench,
@@ -42,6 +43,7 @@ import {
   AGENTS_ROUTE,
   ARTIFACTS_ROUTE,
   COMMAND_CENTER_ROUTE,
+  CONDUCTOR_ROUTE,
   CRON_ROUTE,
   MESSAGING_ROUTE,
   NEW_CHAT_ROUTE,
@@ -227,7 +229,14 @@ export function CommandPalette() {
           { icon: Package, id: 'nav-artifacts', label: cc.nav.artifacts.title, run: go(ARTIFACTS_ROUTE) },
           { icon: Clock, id: 'nav-cron', keywords: ['schedule', 'jobs'], label: t.shell.statusbar.cron, run: go(CRON_ROUTE) },
           { icon: Users, id: 'nav-profiles', label: t.profiles.title, run: go(PROFILES_ROUTE) },
-          { icon: Cpu, id: 'nav-agents', label: t.agents.title, run: go(AGENTS_ROUTE) }
+          { icon: Cpu, id: 'nav-agents', label: t.agents.title, run: go(AGENTS_ROUTE) },
+          {
+            icon: SteeringWheel,
+            id: 'nav-conductor',
+            keywords: ['conductor', 'cockpit', 'missions', 'lanes', 'runners'],
+            label: t.conductor.title,
+            run: go(CONDUCTOR_ROUTE)
+          }
         ]
       },
       {

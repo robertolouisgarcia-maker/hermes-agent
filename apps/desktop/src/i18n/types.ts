@@ -774,6 +774,36 @@ export interface Translations {
     createAction: string
   }
 
+  conductor: {
+    title: string
+    close: string
+    loading: string
+    cockpitLoading: string
+    emptyLanes: string
+    emptyDesc: string
+    lanesError: string
+    lanesErrorDesc: string
+    cockpitError: string
+    cockpitErrorDesc: string
+    noProjection: string
+    noProjectionDesc: string
+    fieldState: string
+    fieldPriority: string
+    fieldRealm: string
+    fieldRepo: string
+    fieldSeverity: string
+    fieldOwnerGoal: string
+    controlsTitle: string
+    noControls: string
+    ownerApproval: string
+    refsTitle: string
+    noRefs: string
+    refValidationContract: string
+    refProofBundle: string
+    refHandoff: string
+    states: Record<string, string>
+  }
+
   artifacts: {
     search: string
     refresh: string

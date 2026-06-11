@@ -1156,6 +1156,43 @@ export const ja = defineLocale({
     createAction: 'Cron を作成'
   },
 
+  conductor: {
+    title: 'コンダクター',
+    close: 'コンダクターを閉じる',
+    loading: 'ミッションを読み込み中…',
+    cockpitLoading: 'コックピットを読み込み中…',
+    emptyLanes: 'アクティブなミッションはありません',
+    emptyDesc: 'コンダクターがミッションをランナーにリースすると、ここにレーンとして表示されます。レーンを選択してコックピットを確認してください。',
+    lanesError: 'ミッションを読み込めませんでした',
+    lanesErrorDesc: 'ゲートウェイがコンダクターのコックピットに接続できませんでした。自動的に再試行します。',
+    cockpitError: 'コックピットを読み込めませんでした',
+    cockpitErrorDesc: 'このミッションのコックピット投影を利用できません。自動的に再試行します。',
+    noProjection: 'まだ投影はありません',
+    noProjectionDesc: 'コンダクターはこのミッションのコックピット投影をまだ発行していません。発行されるとここに表示されます。',
+    fieldState: '状態',
+    fieldPriority: '優先度',
+    fieldRealm: 'レルム',
+    fieldRepo: 'リポジトリファミリー',
+    fieldSeverity: '重大度',
+    fieldOwnerGoal: 'オーナーの目標',
+    controlsTitle: 'コントロール',
+    noControls: '利用できるコントロールはありません。',
+    ownerApproval: 'オーナーの承認が必要',
+    refsTitle: '参照',
+    noRefs: 'まだ参照はありません。',
+    refValidationContract: '検証コントラクト',
+    refProofBundle: 'プルーフバンドル',
+    refHandoff: 'ハンドオフ',
+    states: {
+      working: '作業中',
+      leased: 'リース済み',
+      validating: '検証中',
+      release_ready: 'リリース可能',
+      blocked: 'ブロック',
+      unknown: '不明'
+    }
+  },
+
   artifacts: {
     search: 'アーティファクトを検索...',
     refresh: 'アーティファクトを更新',
