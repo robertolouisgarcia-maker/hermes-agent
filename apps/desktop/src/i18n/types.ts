@@ -96,6 +96,13 @@ export interface Translations {
       signInToRemoteGateway: string
       signInWithProvider: (provider: string) => string
       identityProvider: string
+      webTitle: string
+      webDescription: string
+      gatewayTokenLabel: string
+      gatewayTokenPlaceholder: string
+      saveTokenAndReload: string
+      reload: string
+      webHint: string
     }
   }
 

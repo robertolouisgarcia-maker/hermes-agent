@@ -11,7 +11,15 @@ import { HapticsProvider } from './components/haptics-provider'
 import { I18nProvider } from './i18n'
 import { installClipboardShim } from './lib/clipboard'
 import { queryClient } from './lib/query-client'
+import { installWebBridge } from './lib/web-bridge'
 import { ThemeProvider } from './themes/context'
+
+// Browser boot (no Electron): if the Electron contextBridge (window.hermesDesktop)
+// is absent, install a same-origin HTTP/WS shim so the gateway boot gate finds a
+// bridge and boots normally. A strict no-op when the real bridge is present, so
+// the desktop code path stays byte-unchanged. MUST run before the boot gate
+// (useGatewayBoot) reads window.hermesDesktop.
+installWebBridge()
 
 installClipboardShim()
 

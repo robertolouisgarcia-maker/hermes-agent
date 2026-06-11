@@ -83,7 +83,15 @@ export const ja = defineLocale({
       signInFailed: 'サインインに失敗しました',
       signInToRemoteGateway: 'リモートゲートウェイにサインイン',
       signInWithProvider: provider => `${provider} でサインイン`,
-      identityProvider: 'ID プロバイダー'
+      identityProvider: 'ID プロバイダー',
+      webTitle: 'Hermes に接続できませんでした',
+      webDescription:
+        'このブラウザから Hermes に接続するにはゲートウェイトークンが必要です。下にトークンを貼り付けて再読み込みしてください。チャットや設定は削除されません。',
+      gatewayTokenLabel: 'ゲートウェイトークン',
+      gatewayTokenPlaceholder: 'ゲートウェイトークンを貼り付け',
+      saveTokenAndReload: 'トークンを保存して再読み込み',
+      reload: '再読み込み',
+      webHint: 'トークンはこのブラウザにのみ保存され、ゲートウェイにのみ送信されます。'
     }
   },
 

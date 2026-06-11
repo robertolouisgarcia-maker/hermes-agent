@@ -3,10 +3,12 @@ import { useEffect, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { ErrorIcon } from '@/components/ui/error-state'
+import { Input } from '@/components/ui/input'
 import { LogView } from '@/components/ui/log-view'
 import type { DesktopConnectionConfig } from '@/global'
 import { useI18n } from '@/i18n'
 import { FileText, Loader2, LogIn, RefreshCw, Wrench } from '@/lib/icons'
+import { getGatewayToken, isWebClient, setGatewayToken } from '@/lib/web-bridge'
 import { $desktopBoot } from '@/store/boot'
 import { notify, notifyError } from '@/store/notifications'
 import { $desktopOnboarding } from '@/store/onboarding'
@@ -27,7 +29,100 @@ type BusyAction = 'local' | 'repair' | 'retry' | 'signin' | null
 // exited during startup, bootstrap latched, …). Without this the app shell
 // renders dead — "gateway offline", no composer, only a toast — with no way
 // to retry, repair the install, switch the gateway, or find the logs.
+//
+// In a browser (isWebClient) the IPC recovery buttons (Retry / Repair / Use
+// local gateway) are dead no-ops, so BootFailureOverlay swaps in the web
+// variant (WebBootFailureCard) instead — a "Set gateway token" affordance plus
+// "Reload". The picker calls isWebClient() (a plain function, not a hook), so
+// each card keeps a stable hook order.
 export function BootFailureOverlay() {
+  if (isWebClient()) {
+    return <WebBootFailureCard />
+  }
+
+  return <DesktopBootFailureCard />
+}
+
+// The browser-mode recovery card. The Electron contextBridge is absent, so the
+// desktop recovery actions (resetBootstrap / repairBootstrap / applyConnectionConfig)
+// cannot run — they are IPC calls. The only actionable browser recovery is to set
+// the gateway token (the boot failed because none was stored / it was rejected)
+// and reload.
+function WebBootFailureCard() {
+  const boot = useStore($desktopBoot)
+  const onboarding = useStore($desktopOnboarding)
+  const { t } = useI18n()
+  const [token, setToken] = useState(() => getGatewayToken() ?? '')
+
+  const visible = Boolean(boot.error) && !boot.running
+  const suppressed = onboarding.flow.status !== 'idle' && onboarding.flow.status !== 'error'
+
+  if (!visible || suppressed) {
+    return null
+  }
+
+  const copy = t.boot.failure
+
+  const saveAndReload = () => {
+    setGatewayToken(token)
+    window.location.reload()
+  }
+
+  const reload = () => window.location.reload()
+
+  return (
+    <div className="fixed inset-0 z-[1400] flex items-center justify-center bg-(--ui-chat-surface-background) p-6">
+      <div className="w-full max-w-[40rem] overflow-hidden rounded-xl border border-(--stroke-nous) bg-(--ui-chat-bubble-background) shadow-nous">
+        <div className="flex items-start gap-3 px-5 py-4">
+          <ErrorIcon className="mt-0.5" size="1.25rem" />
+          <div>
+            <h2 className="text-[0.9375rem] font-semibold tracking-tight">{copy.webTitle}</h2>
+            <p className="mt-1 text-[0.8125rem] leading-5 text-(--ui-text-tertiary)">{copy.webDescription}</p>
+          </div>
+        </div>
+
+        <div className="grid gap-4 p-5">
+          <div className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-xs text-destructive">
+            {boot.error}
+          </div>
+
+          <form
+            className="grid gap-2"
+            onSubmit={event => {
+              event.preventDefault()
+              saveAndReload()
+            }}
+          >
+            <label className="text-xs font-medium text-(--ui-text-secondary)" htmlFor="hermes-web-gateway-token">
+              {copy.gatewayTokenLabel}
+            </label>
+            <Input
+              autoComplete="off"
+              autoFocus
+              id="hermes-web-gateway-token"
+              onChange={event => setToken(event.target.value)}
+              placeholder={copy.gatewayTokenPlaceholder}
+              type="password"
+              value={token}
+            />
+            <div className="mt-1 flex flex-wrap gap-2">
+              <Button disabled={!token.trim()} type="submit">
+                {copy.saveTokenAndReload}
+              </Button>
+              <Button onClick={reload} type="button" variant="secondary">
+                <RefreshCw />
+                {copy.reload}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">{copy.webHint}</p>
+          </form>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function DesktopBootFailureCard() {
   const boot = useStore($desktopBoot)
   const onboarding = useStore($desktopOnboarding)
   const { t } = useI18n()

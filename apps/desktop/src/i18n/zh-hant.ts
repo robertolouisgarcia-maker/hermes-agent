@@ -80,7 +80,14 @@ export const zhHant = defineLocale({
       signInFailed: '登入失敗',
       signInToRemoteGateway: '登入遠端閘道',
       signInWithProvider: provider => `使用 ${provider} 登入`,
-      identityProvider: '您的身分提供方'
+      identityProvider: '您的身分提供方',
+      webTitle: 'Hermes 無法連線',
+      webDescription: '此瀏覽器需要閘道權杖才能連線 Hermes。請在下方貼上權杖，然後重新載入。這裡的操作不會刪除您的對話或設定。',
+      gatewayTokenLabel: '閘道權杖',
+      gatewayTokenPlaceholder: '貼上您的閘道權杖',
+      saveTokenAndReload: '儲存權杖並重新載入',
+      reload: '重新載入',
+      webHint: '權杖僅儲存在此瀏覽器中，並且僅傳送至您的閘道。'
     }
   },
 

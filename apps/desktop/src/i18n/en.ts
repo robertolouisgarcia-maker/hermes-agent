@@ -82,7 +82,15 @@ export const en: Translations = {
       signInFailed: 'Sign-in failed',
       signInToRemoteGateway: 'Sign in to remote gateway',
       signInWithProvider: provider => `Sign in with ${provider}`,
-      identityProvider: 'your identity provider'
+      identityProvider: 'your identity provider',
+      webTitle: "Hermes couldn't connect",
+      webDescription:
+        'This browser needs a gateway token to reach Hermes. Paste your token below, then reload. Nothing here deletes your chats or settings.',
+      gatewayTokenLabel: 'Gateway token',
+      gatewayTokenPlaceholder: 'Paste your gateway token',
+      saveTokenAndReload: 'Save token and reload',
+      reload: 'Reload',
+      webHint: 'The token is stored only in this browser and sent only to your gateway.'
     }
   },
 

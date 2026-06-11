@@ -80,7 +80,14 @@ export const zh: Translations = {
       signInFailed: '登录失败',
       signInToRemoteGateway: '登录远程网关',
       signInWithProvider: provider => `使用 ${provider} 登录`,
-      identityProvider: '你的身份提供方'
+      identityProvider: '你的身份提供方',
+      webTitle: 'Hermes 无法连接',
+      webDescription: '此浏览器需要网关令牌才能连接 Hermes。请在下方粘贴令牌，然后重新加载。这里的操作不会删除你的聊天或设置。',
+      gatewayTokenLabel: '网关令牌',
+      gatewayTokenPlaceholder: '粘贴你的网关令牌',
+      saveTokenAndReload: '保存令牌并重新加载',
+      reload: '重新加载',
+      webHint: '令牌仅存储在此浏览器中，并且仅发送到你的网关。'
     }
   },
 
