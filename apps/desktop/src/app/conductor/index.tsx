@@ -19,7 +19,9 @@ import { Loader } from '@/components/ui/loader'
 import { type Translations, useI18n } from '@/i18n'
 import {
   Activity,
+  Brain,
   CheckCircle2,
+  Cpu,
   GitBranch,
   Globe,
   type IconComponent,
@@ -49,6 +51,14 @@ const MISSIONS_LIMIT = 50
 // design), so polling it is cheap — a slower cadence than the live lanes is
 // plenty for a readiness matrix that only changes when the fleet wiring does.
 const SYSTEMCHECK_INTERVAL_MS = 10000
+
+// The receipt stream feeds the agent verdicts, the cost economy, and the routing
+// win-rate. It is shared by the mission detail (latest receipt for the selected
+// lane) AND the system-health routing summary (aggregate across all receipts),
+// so it is lifted into ConductorView and polled once on a middle cadence.
+const RECEIPTS_INTERVAL_MS = 5000
+
+const RECEIPTS_LIMIT = 100
 
 // One JSON-RPC call into the gateway, which proxies the PH Conductor cockpit
 // tools. Mirrors how every other overlay reaches the gateway.
@@ -192,6 +202,173 @@ interface ConductorExecuteResponse extends GatewayResult {
   approvalId?: string
 }
 
+// -- Receipts (agents + economy + routing) shapes ---------------------
+//
+// conductor.receipts.tail returns the receipt event stream. Each event carries a
+// receipt whose `agents` array records which engine ran each role + its verdict;
+// the cockpit reads these to surface the cross-family agent verdicts (the Wave-4
+// gap the mission projection itself does not carry), the per-lane cost economy,
+// and a routing win-rate. Everything is optional so a partial receipt still
+// renders without throwing.
+interface ReceiptAgent {
+  role?: string
+  provider?: string
+  model?: string
+  lane?: string
+  verdict?: string
+}
+
+interface ReceiptBody {
+  agents?: ReceiptAgent[]
+}
+
+interface ReceiptEvent {
+  eventSequence?: number
+  missionId?: string
+  receipt?: ReceiptBody
+}
+
+interface ConductorReceiptsResponse extends GatewayResult {
+  receipts?: ReceiptEvent[]
+  nextCursor?: number
+}
+
+// Lane → cost tier. Static map in the renderer (no new gateway work): which
+// engine lane costs what. local is free, codex rides a subscription, the metered
+// frontier lanes (claude/gemini) bill per token, anything else is unknown.
+type CostTier = 'free' | 'subscription' | 'metered' | 'unknown'
+
+const LANE_COST_TIER: Record<string, CostTier> = {
+  local: 'free',
+  codex: 'subscription',
+  claude: 'metered',
+  gemini: 'metered'
+}
+
+function costTier(lane: string | undefined): CostTier {
+  return (lane ? LANE_COST_TIER[lane] : undefined) ?? 'unknown'
+}
+
+// Cost tier → localized label.
+function costTierLabel(tier: CostTier, ins: Translations['conductor']['insights']): string {
+  if (tier === 'free') {
+    return ins.costFree
+  }
+  if (tier === 'subscription') {
+    return ins.costSubscription
+  }
+  if (tier === 'metered') {
+    return ins.costMetered
+  }
+
+  return ins.costUnknown
+}
+
+// Cost tier → StatusDot tone for the pill pip. free reads as the accent "good"
+// pip, metered as a warning, subscription/unknown as a muted/tertiary pip.
+function costTierTone(tier: CostTier): StatusTone {
+  if (tier === 'free') {
+    return 'good'
+  }
+  if (tier === 'metered') {
+    return 'warn'
+  }
+
+  return 'muted'
+}
+
+// Agent verdict → StatusDot tone. pass/passed/ok read as success (good),
+// fail/failed as destructive (bad), anything else as a warning.
+function agentVerdictTone(verdict: string | undefined): StatusTone {
+  const v = verdict?.toLowerCase()
+  if (v === 'pass' || v === 'passed' || v === 'ok') {
+    return 'good'
+  }
+  if (v === 'fail' || v === 'failed') {
+    return 'bad'
+  }
+
+  return 'warn'
+}
+
+// Whether an agent verdict counts as a routing win.
+function isWin(verdict: string | undefined): boolean {
+  return agentVerdictTone(verdict) === 'good'
+}
+
+// Win-rate → StatusDot tone. >=0.8 good, >=0.5 warn, else bad.
+function winRateTone(wins: number, total: number): StatusTone {
+  if (total === 0) {
+    return 'muted'
+  }
+  const rate = wins / total
+  if (rate >= 0.8) {
+    return 'good'
+  }
+  if (rate >= 0.5) {
+    return 'warn'
+  }
+
+  return 'bad'
+}
+
+// The latest receipt for a mission: the one with the max eventSequence whose
+// missionId matches. Null when the mission has no receipt yet.
+function latestReceiptFor(receipts: ReceiptEvent[], missionId: string | null): ReceiptEvent | null {
+  if (!missionId) {
+    return null
+  }
+
+  let latest: ReceiptEvent | null = null
+  for (const event of receipts) {
+    if (event.missionId !== missionId) {
+      continue
+    }
+    if (!latest || (event.eventSequence ?? 0) > (latest.eventSequence ?? 0)) {
+      latest = event
+    }
+  }
+
+  return latest
+}
+
+// One routing row: an engine (provider:model) with its lane, cost tier, and
+// aggregate win/total across every receipt's agents.
+interface RoutingRow {
+  key: string
+  provider: string
+  model: string
+  lane?: string
+  wins: number
+  total: number
+}
+
+// Aggregate the routing brain: group every agent across all receipts by
+// provider:model, counting wins (verdict pass) / total. The lane is taken from
+// the first agent seen for the engine (an engine rides one lane).
+function aggregateRouting(receipts: ReceiptEvent[]): RoutingRow[] {
+  const byEngine = new Map<string, RoutingRow>()
+
+  for (const event of receipts) {
+    for (const agent of event.receipt?.agents ?? []) {
+      const provider = agent.provider ?? '—'
+      const model = agent.model ?? '—'
+      const key = `${provider}:${model}`
+      let row = byEngine.get(key)
+      if (!row) {
+        row = { key, provider, model, lane: agent.lane, wins: 0, total: 0 }
+        byEngine.set(key, row)
+      }
+      row.total += 1
+      if (isWin(agent.verdict)) {
+        row.wins += 1
+      }
+    }
+  }
+
+  return [...byEngine.values()]
+}
+
 // Verdict → StatusDot tone. READY reads as success (good), DEGRADED as a
 // warning, NOT-READY as destructive, anything unknown as a muted pip.
 const VERDICT_TONE: Record<string, StatusTone> = {
@@ -246,6 +423,20 @@ function shortMissionId(missionId: string): string {
   const tail = missionId.split(/[/:]/).filter(Boolean).pop()
 
   return tail || missionId
+}
+
+// The per-lane cost badge: a small pill, lane + cost-tier label, toned by tier.
+// Composed from the StatusDot primitive + tokens (no new chrome). Shared by the
+// agent rows (the per-run economy) and the routing rows (the routing brain).
+function CostBadge({ lane, ins }: { lane: string | undefined; ins: Translations['conductor']['insights'] }) {
+  const tier = costTier(lane)
+
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-md bg-(--ui-bg-quaternary) px-2 py-0.5 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-secondary)">
+      <StatusDot tone={costTierTone(tier)} />
+      <span className="font-mono">{ins.laneCost(lane ?? '—', costTierLabel(tier, ins))}</span>
+    </span>
+  )
 }
 
 interface ConductorViewProps extends React.ComponentProps<'section'> {
@@ -343,6 +534,29 @@ export function ConductorView({ onClose, requestGateway }: ConductorViewProps) {
     refetchInterval: SYSTEMCHECK_INTERVAL_MS
   })
 
+  // The receipt stream: lifted here so both the mission detail (latest receipt
+  // for the selected lane) and the system-health routing summary (aggregate)
+  // read the same single poll. Throw on the {ok:false} envelope so both consumers
+  // route to a receipts ErrorState rather than rendering stale/blank insights.
+  const receiptsQuery = useQuery({
+    queryKey: ['conductor', 'receipts'],
+    queryFn: async () => {
+      const res = await requestGateway<ConductorReceiptsResponse>('conductor.receipts.tail', {
+        afterSequence: 0,
+        limit: RECEIPTS_LIMIT
+      })
+
+      if (res && res.ok === false) {
+        throw new Error(res.reason ?? 'receipts_unavailable')
+      }
+
+      return res
+    },
+    refetchInterval: RECEIPTS_INTERVAL_MS
+  })
+
+  const receipts = useMemo(() => receiptsQuery.data?.receipts ?? [], [receiptsQuery.data])
+
   // No lane is bound to the detail pane: the cockpit home is system health.
   const showSystemHealth = !selectedMissionId
 
@@ -385,6 +599,8 @@ export function ConductorView({ onClose, requestGateway }: ConductorViewProps) {
               c={c}
               isError={systemcheckQuery.isError}
               isLoading={systemcheckQuery.isPending}
+              receipts={receipts}
+              receiptsError={receiptsQuery.isError}
               report={systemcheckQuery.data?.report}
             />
           ) : (
@@ -397,6 +613,8 @@ export function ConductorView({ onClose, requestGateway }: ConductorViewProps) {
               missionsError={missionsQuery.isError}
               missionsLoading={missionsQuery.isPending}
               noMissions={!missionsQuery.isPending && !missionsQuery.isError && missions.length === 0}
+              receipts={receipts}
+              receiptsError={receiptsQuery.isError}
             />
           )}
         </OverlayMain>
@@ -423,14 +641,19 @@ function SystemHealth({
   c,
   isError,
   isLoading,
+  receipts,
+  receiptsError,
   report
 }: {
   c: Translations['conductor']
   isError: boolean
   isLoading: boolean
+  receipts: ReceiptEvent[]
+  receiptsError: boolean
   report?: SelfCheckReport
 }) {
   const s = c.system
+  const ins = c.insights
 
   if (isError) {
     return (
@@ -508,9 +731,9 @@ function SystemHealth({
           title={s.floors}
         />
         {floors.length === 0 ? (
-          <p className="py-2 pb-6 text-xs text-muted-foreground">{s.noFloors}</p>
+          <p className="py-2 text-xs text-muted-foreground">{s.noFloors}</p>
         ) : (
-          <div className="mb-6 flex flex-col">
+          <div className="flex flex-col">
             {floors.map(floor => (
               <ListRow
                 action={
@@ -526,8 +749,56 @@ function SystemHealth({
             ))}
           </div>
         )}
+
+        <RoutingSection ins={ins} receipts={receipts} receiptsError={receiptsError} />
       </div>
     </div>
+  )
+}
+
+// The routing brain: which engines are winning + at what cost. Aggregates every
+// agent across all receipts by provider:model, rendering a win/total ratio toned
+// by win-rate plus the engine's cost tier. Composed from existing primitives +
+// tokens; flat, no new gateway calls. The receipts error rides through so the
+// pane shows the receipts ErrorState rather than silently dropping the section.
+function RoutingSection({
+  ins,
+  receipts,
+  receiptsError
+}: {
+  ins: Translations['conductor']['insights']
+  receipts: ReceiptEvent[]
+  receiptsError: boolean
+}) {
+  const rows = useMemo(() => aggregateRouting(receipts), [receipts])
+
+  return (
+    <>
+      <SectionHeading icon={Brain} meta={rows.length ? String(rows.length) : undefined} title={ins.routingTitle} />
+      {receiptsError ? (
+        <div className="mb-6 grid min-h-32 place-items-center">
+          <ErrorState description={ins.receiptsErrorDesc} title={ins.receiptsError} />
+        </div>
+      ) : rows.length === 0 ? (
+        <p className="py-2 pb-6 text-xs text-muted-foreground">{ins.noRouting}</p>
+      ) : (
+        <div className="mb-6 flex flex-col">
+          {rows.map(row => (
+            <ListRow
+              action={
+                <span className="inline-flex items-center gap-2 text-[length:var(--conversation-text-font-size)] text-foreground sm:justify-self-end">
+                  <StatusDot tone={winRateTone(row.wins, row.total)} />
+                  {ins.winRate(row.wins, row.total)}
+                </span>
+              }
+              description={<CostBadge ins={ins} lane={row.lane} />}
+              key={row.key}
+              title={<span className="font-mono">{row.key}</span>}
+            />
+          ))}
+        </div>
+      )}
+    </>
   )
 }
 
@@ -570,7 +841,9 @@ function MissionDetail({
   mission,
   missionsError,
   missionsLoading,
-  noMissions
+  noMissions,
+  receipts,
+  receiptsError
 }: {
   c: Translations['conductor']
   cockpit?: CockpitProjection
@@ -580,6 +853,8 @@ function MissionDetail({
   missionsError: boolean
   missionsLoading: boolean
   noMissions: boolean
+  receipts: ReceiptEvent[]
+  receiptsError: boolean
 }) {
   if (missionsError) {
     return (
@@ -671,6 +946,8 @@ function MissionDetail({
           <ListRow action={detailValue(core.ownerGoal)} title={c.fieldOwnerGoal} />
         </div>
 
+        <AgentsSection ins={c.insights} missionId={mission.missionId} receipts={receipts} receiptsError={receiptsError} />
+
         <SectionHeading
           icon={Package}
           meta={controls.length ? String(controls.length) : undefined}
@@ -719,6 +996,61 @@ function MissionDetail({
         )}
       </div>
     </div>
+  )
+}
+
+// The cross-family agent verdicts for a mission: the agents of its LATEST receipt
+// (max eventSequence), each with its engine (provider:model), the verdict pip +
+// word, and the per-lane cost badge. This is the Wave-4 gap the mission
+// projection itself does not carry. Composed from existing primitives + tokens;
+// a quiet no-run line when the mission has no receipt (never a crash).
+function AgentsSection({
+  ins,
+  missionId,
+  receipts,
+  receiptsError
+}: {
+  ins: Translations['conductor']['insights']
+  missionId: string
+  receipts: ReceiptEvent[]
+  receiptsError: boolean
+}) {
+  const agents = useMemo(() => {
+    const latest = latestReceiptFor(receipts, missionId)
+
+    return latest?.receipt?.agents ?? []
+  }, [receipts, missionId])
+
+  return (
+    <>
+      <SectionHeading icon={Cpu} meta={agents.length ? String(agents.length) : undefined} title={ins.agentsTitle} />
+      {receiptsError ? (
+        <div className="grid min-h-32 place-items-center">
+          <ErrorState description={ins.receiptsErrorDesc} title={ins.receiptsError} />
+        </div>
+      ) : agents.length === 0 ? (
+        <p className="py-2 text-xs text-muted-foreground">{ins.noAgentRun}</p>
+      ) : (
+        <div className="flex flex-col">
+          {agents.map((agent, index) => (
+            <ListRow
+              action={
+                <span className="inline-flex items-center gap-2 sm:justify-self-end">
+                  <span className="inline-flex items-center gap-2 text-[length:var(--conversation-text-font-size)] text-foreground">
+                    <StatusDot tone={agentVerdictTone(agent.verdict)} />
+                    {agent.verdict ?? '—'}
+                  </span>
+                  <CostBadge ins={ins} lane={agent.lane} />
+                </span>
+              }
+              description={<span className="font-mono">{`${agent.provider ?? '—'}:${agent.model ?? '—'}`}</span>}
+              key={`${agent.role ?? 'agent'}-${index}`}
+              title={<span className="font-mono">{agent.role ?? '—'}</span>}
+            />
+          ))}
+        </div>
+      )}
+    </>
   )
 }
 

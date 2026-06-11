@@ -1208,6 +1208,20 @@ export const zhHant = defineLocale({
       startedApproval: approvalId => `核准：${approvalId}`,
       close: '關閉',
       done: '完成'
+    },
+    insights: {
+      agentsTitle: '代理',
+      noAgentRun: '尚無代理執行。',
+      routingTitle: '路由',
+      costFree: '免費',
+      costSubscription: '訂閱',
+      costMetered: '按量計費',
+      costUnknown: '未知',
+      laneCost: (lane, cost) => `${lane} - ${cost}`,
+      winRate: (wins, total) => `${wins}/${total}`,
+      noRouting: '尚無路由資料。',
+      receiptsError: '無法載入收據',
+      receiptsErrorDesc: '閘道無法連接到指揮的收據來源。它將自動重試。'
     }
   },
 

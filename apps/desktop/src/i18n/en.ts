@@ -1109,6 +1109,20 @@ export const en: Translations = {
       startedApproval: approvalId => `Approval: ${approvalId}`,
       close: 'Close',
       done: 'Done'
+    },
+    insights: {
+      agentsTitle: 'Agents',
+      noAgentRun: 'No agent run yet.',
+      routingTitle: 'Routing',
+      costFree: 'free',
+      costSubscription: 'subscription',
+      costMetered: 'metered',
+      costUnknown: 'unknown',
+      laneCost: (lane, cost) => `${lane} - ${cost}`,
+      winRate: (wins, total) => `${wins}/${total}`,
+      noRouting: 'No routing data yet.',
+      receiptsError: 'Could not load receipts',
+      receiptsErrorDesc: 'The gateway could not reach the Conductor receipts feed. It will retry automatically.'
     }
   },
 

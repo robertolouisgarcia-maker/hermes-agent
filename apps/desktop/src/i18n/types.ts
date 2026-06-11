@@ -854,6 +854,20 @@ export interface Translations {
       close: string
       done: string
     }
+    insights: {
+      agentsTitle: string
+      noAgentRun: string
+      routingTitle: string
+      costFree: string
+      costSubscription: string
+      costMetered: string
+      costUnknown: string
+      laneCost: (lane: string, cost: string) => string
+      winRate: (wins: number, total: number) => string
+      noRouting: string
+      receiptsError: string
+      receiptsErrorDesc: string
+    }
   }
 
   artifacts: {

@@ -1243,6 +1243,20 @@ export const ja = defineLocale({
       startedApproval: approvalId => `承認: ${approvalId}`,
       close: '閉じる',
       done: '完了'
+    },
+    insights: {
+      agentsTitle: 'エージェント',
+      noAgentRun: 'まだエージェントの実行はありません。',
+      routingTitle: 'ルーティング',
+      costFree: '無料',
+      costSubscription: 'サブスクリプション',
+      costMetered: '従量課金',
+      costUnknown: '不明',
+      laneCost: (lane, cost) => `${lane} - ${cost}`,
+      winRate: (wins, total) => `${wins}/${total}`,
+      noRouting: 'まだルーティングデータはありません。',
+      receiptsError: 'レシートを読み込めませんでした',
+      receiptsErrorDesc: 'ゲートウェイがコンダクターのレシートフィードに接続できませんでした。自動的に再試行します。'
     }
   },
 

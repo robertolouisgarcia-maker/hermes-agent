@@ -626,3 +626,220 @@ describe('ConductorView drive + approve', () => {
     })
   })
 })
+
+// -- Cockpit agents + economy + routing (CC-F2/F3) -------------------
+//
+// The cross-family agent verdicts + per-lane cost economy + routing win-rate, all
+// sourced from the EXISTING conductor.receipts.tail gateway. The mission detail
+// surfaces the agents of the latest receipt for the selected mission; the system-
+// health pane aggregates a routing win-rate across all receipts.
+
+// A receipts.tail page. Two receipts for mission-alpha (so the LATEST, by max
+// eventSequence, is the one with the higher sequence) + one for mission-bravo,
+// spanning local (free) + claude (metered) lanes and pass/fail verdicts so the
+// aggregate win-rate is non-trivial.
+function receiptsTail() {
+  return {
+    ok: true,
+    nextCursor: 0,
+    receipts: [
+      {
+        eventSequence: 10,
+        missionId: 'mission-alpha',
+        receipt: {
+          agents: [
+            { role: 'stale-implementer', provider: 'lmstudio', model: 'qwen', lane: 'local', verdict: 'fail' }
+          ]
+        }
+      },
+      {
+        eventSequence: 42,
+        missionId: 'mission-alpha',
+        receipt: {
+          agents: [
+            { role: 'implementer', provider: 'lmstudio', model: 'qwen2.5-coder', lane: 'local', verdict: 'pass' },
+            { role: 'judge', provider: 'lmstudio', model: 'qwen2.5-coder', lane: 'local', verdict: 'pass' }
+          ]
+        }
+      },
+      {
+        eventSequence: 7,
+        missionId: 'mission-bravo',
+        receipt: {
+          agents: [
+            { role: 'reviewer', provider: 'anthropic', model: 'claude-opus', lane: 'claude', verdict: 'fail' }
+          ]
+        }
+      }
+    ]
+  }
+}
+
+describe('ConductorView agents + economy + routing', () => {
+  it('MissionDetail shows the agents + verdicts + cost-tier badges from the latest receipt for the selected mission', async () => {
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: MISSIONS }
+      }
+
+      if (method === 'conductor.cockpit.get') {
+        return cockpitFor(String(params?.missionId ?? 'mission-alpha'))
+      }
+
+      if (method === 'conductor.receipts.tail') {
+        return receiptsTail()
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+
+    // The first lane (mission-alpha) auto-selects → the agents of its LATEST
+    // receipt (eventSequence 42) render. The stale receipt (seq 10) is ignored.
+    await waitFor(() => {
+      expect(screen.getByText('implementer')).toBeTruthy()
+    })
+    expect(screen.getByText('judge')).toBeTruthy()
+    // The stale agent from the lower-sequence receipt must NOT show.
+    expect(screen.queryByText('stale-implementer')).toBeNull()
+
+    // The Agents section heading is present.
+    expect(screen.getByText('Agents')).toBeTruthy()
+
+    // provider:model secondary line.
+    expect(screen.getAllByText('lmstudio:qwen2.5-coder').length).toBe(2)
+
+    // The verdict word + the cost-tier badge (local → free).
+    expect(screen.getAllByText('pass').length).toBe(2)
+    expect(screen.getAllByText('local - free').length).toBe(2)
+
+    // receipts.tail was actually queried.
+    expect(requestGateway).toHaveBeenCalledWith('conductor.receipts.tail', expect.any(Object))
+  })
+
+  it('MissionDetail shows the quiet no-agent-run line for a mission with no receipt', async () => {
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: MISSIONS }
+      }
+
+      if (method === 'conductor.cockpit.get') {
+        return cockpitFor(String(params?.missionId ?? 'mission-alpha'))
+      }
+
+      if (method === 'conductor.receipts.tail') {
+        // Receipts exist, but none for mission-alpha (the auto-selected lane).
+        return {
+          ok: true,
+          nextCursor: 0,
+          receipts: [
+            {
+              eventSequence: 7,
+              missionId: 'mission-bravo',
+              receipt: { agents: [{ role: 'reviewer', provider: 'anthropic', model: 'claude-opus', lane: 'claude', verdict: 'fail' }] }
+            }
+          ]
+        }
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+
+    await waitFor(() => {
+      expect(screen.getByText('Agents')).toBeTruthy()
+    })
+    // The quiet no-run line, not a crash.
+    expect(screen.getByText('No agent run yet.')).toBeTruthy()
+  })
+
+  it('SystemHealth shows the routing win-rates aggregated across all receipts', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: [] }
+      }
+
+      if (method === 'conductor.systemcheck') {
+        return readyMatrix()
+      }
+
+      if (method === 'conductor.receipts.tail') {
+        return receiptsTail()
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+
+    // The routing section heading.
+    await waitFor(() => {
+      expect(screen.getByText('Routing')).toBeTruthy()
+    })
+
+    // lmstudio:qwen2.5-coder won 2/2 (both pass) → "2/2".
+    expect(screen.getByText('lmstudio:qwen2.5-coder')).toBeTruthy()
+    expect(screen.getByText('2/2')).toBeTruthy()
+
+    // lmstudio:qwen lost 0/1 (the stale fail receipt still counts in aggregate),
+    // and anthropic:claude-opus lost 0/1 too — two engines share the 0/1 ratio.
+    expect(screen.getByText('lmstudio:qwen')).toBeTruthy()
+    expect(screen.getAllByText('0/1').length).toBe(2)
+
+    // anthropic:claude-opus lost 0/1, and carries a metered cost tier.
+    expect(screen.getByText('anthropic:claude-opus')).toBeTruthy()
+    expect(screen.getByText('claude - metered')).toBeTruthy()
+  })
+
+  it('SystemHealth shows the quiet no-routing line when there are no receipts', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: [] }
+      }
+
+      if (method === 'conductor.systemcheck') {
+        return readyMatrix()
+      }
+
+      if (method === 'conductor.receipts.tail') {
+        return { ok: true, nextCursor: 0, receipts: [] }
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+
+    await waitFor(() => {
+      expect(screen.getByText('Routing')).toBeTruthy()
+    })
+    expect(screen.getByText('No routing data yet.')).toBeTruthy()
+  })
+
+  it('a receipts.tail ok:false routes the mission detail to the error state', async () => {
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: MISSIONS }
+      }
+
+      if (method === 'conductor.cockpit.get') {
+        return cockpitFor(String(params?.missionId ?? 'mission-alpha'))
+      }
+
+      if (method === 'conductor.receipts.tail') {
+        return { ok: false, reason: 'receipts_unavailable' }
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+
+    // The receipts ErrorState surfaces (shared across the detail + routing panes).
+    await waitFor(() => {
+      expect(screen.getByText('Could not load receipts')).toBeTruthy()
+    })
+  })
+})

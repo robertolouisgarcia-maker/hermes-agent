@@ -1295,6 +1295,20 @@ export const zh: Translations = {
       startedApproval: approvalId => `批准：${approvalId}`,
       close: '关闭',
       done: '完成'
+    },
+    insights: {
+      agentsTitle: '代理',
+      noAgentRun: '尚无代理运行。',
+      routingTitle: '路由',
+      costFree: '免费',
+      costSubscription: '订阅',
+      costMetered: '按量计费',
+      costUnknown: '未知',
+      laneCost: (lane, cost) => `${lane} - ${cost}`,
+      winRate: (wins, total) => `${wins}/${total}`,
+      noRouting: '尚无路由数据。',
+      receiptsError: '无法加载收据',
+      receiptsErrorDesc: '网关无法连接到指挥的收据源。它将自动重试。'
     }
   },
 
