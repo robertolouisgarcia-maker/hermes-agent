@@ -4660,3 +4660,298 @@ class TestDesktopCronTicker:
 
         with self._client():
             assert not called.wait(0.5), "ticker must not run outside the desktop app"
+
+
+# ---------------------------------------------------------------------------
+# CC-A5 part 2: proxy-attested Tailscale identity on the REST token path.
+#
+# The loopback proxy strips inbound Tailscale-User-* and re-injects the real
+# tailnet identity plus X-Hermes-Proxy-Auth: <secret>.  The backend accepts
+# that attested identity as an ALTERNATIVE to the session token — but ONLY when
+# the secret matches (constant-time) AND the login is the owner.  Token mode
+# stays the fallback.  Fail closed when the secret file is absent.
+# ---------------------------------------------------------------------------
+
+
+class TestProxyAttestedIdentityRest:
+    """Owner identity attested by the loopback proxy authenticates REST calls
+    that are otherwise gated by the session token — with no token presented."""
+
+    _OWNER_LOGIN = "robertolouisgarcia@gmail.com"
+    _SECRET = "proxy-attest-secret-value-xyz789"
+
+    @pytest.fixture
+    def _client(self, monkeypatch, _isolate_hermes_home):
+        try:
+            from starlette.testclient import TestClient
+        except ImportError:
+            pytest.skip("fastapi/starlette not installed")
+        import hermes_state
+        from hermes_constants import get_hermes_home
+        from hermes_cli.web_server import app
+
+        monkeypatch.setattr(
+            hermes_state, "DEFAULT_DB_PATH", get_hermes_home() / "state.db"
+        )
+        # The /api/env/reveal endpoint is rate-limited (5 / 30s window) via a
+        # module-level list; clear it so back-to-back reveal-based auth tests
+        # don't collide on a shared 429.
+        import hermes_cli.web_server as _ws
+
+        _ws._reveal_timestamps.clear()
+        # No session header on this client: only the attested identity (or its
+        # absence) decides auth.
+        return TestClient(app)
+
+    @pytest.fixture
+    def _secret_present(self, monkeypatch, tmp_path):
+        import hermes_cli.web_server as ws
+
+        token_file = tmp_path / "dashboard-proxy-attest.token"
+        token_file.write_text(self._SECRET + "\n", encoding="utf-8")
+        monkeypatch.setattr(ws, "_PROXY_ATTEST_TOKEN_PATH", str(token_file))
+        ws._reset_proxy_attestation_cache()
+        yield token_file
+        ws._reset_proxy_attestation_cache()
+
+    @pytest.fixture
+    def _secret_absent(self, monkeypatch, tmp_path):
+        import hermes_cli.web_server as ws
+
+        missing = tmp_path / "nope.token"
+        monkeypatch.setattr(ws, "_PROXY_ATTEST_TOKEN_PATH", str(missing))
+        ws._reset_proxy_attestation_cache()
+        yield missing
+        ws._reset_proxy_attestation_cache()
+
+    def _seed_secret_var(self):
+        """Persist a known env var so /api/env/reveal has something to return."""
+        from hermes_cli.config import save_env_value
+
+        save_env_value("TEST_ATTEST_REVEAL", "super-secret-attested")
+
+    # ── (a) matching attestation + owner login authenticates ────────────
+
+    def test_matching_attestation_owner_login_authenticates_middleware(
+        self, _client, _secret_present
+    ):
+        """/api/media is gated by auth_middleware; the attested owner identity
+        passes it with no session token."""
+        from hermes_constants import get_hermes_home
+
+        img_dir = get_hermes_home() / "images"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        img = img_dir / "shot.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+
+        resp = _client.get(
+            "/api/media",
+            params={"path": str(img)},
+            headers={
+                "X-Hermes-Proxy-Auth": self._SECRET,
+                "Tailscale-User-Login": self._OWNER_LOGIN,
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["data_url"].startswith("data:image/png;base64,")
+
+    def test_matching_attestation_owner_login_authenticates_require_token(
+        self, _client, _secret_present
+    ):
+        """/api/env/reveal is gated by _require_token; the attested owner
+        identity passes it with no session token."""
+        self._seed_secret_var()
+        resp = _client.post(
+            "/api/env/reveal",
+            json={"key": "TEST_ATTEST_REVEAL"},
+            headers={
+                "X-Hermes-Proxy-Auth": self._SECRET,
+                "Tailscale-User-Login": self._OWNER_LOGIN,
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["value"] == "super-secret-attested"
+
+    def test_owner_login_case_insensitive(self, _client, _secret_present):
+        self._seed_secret_var()
+        resp = _client.post(
+            "/api/env/reveal",
+            json={"key": "TEST_ATTEST_REVEAL"},
+            headers={
+                "X-Hermes-Proxy-Auth": self._SECRET,
+                "Tailscale-User-Login": "  ROBERTOLouisGarcia@GMAIL.com  ",
+            },
+        )
+        assert resp.status_code == 200
+
+    # ── (b) matching attestation, NON-owner login -> rejected ───────────
+
+    def test_matching_attestation_non_owner_login_rejected(
+        self, _client, _secret_present
+    ):
+        self._seed_secret_var()
+        resp = _client.post(
+            "/api/env/reveal",
+            json={"key": "TEST_ATTEST_REVEAL"},
+            headers={
+                "X-Hermes-Proxy-Auth": self._SECRET,
+                "Tailscale-User-Login": "attacker@evil.test",
+            },
+        )
+        assert resp.status_code == 401
+
+    # ── (c) owner login but WRONG/empty attestation -> rejected ─────────
+    #        MUTATION-PROVE: dropping the attn compare lets a forged login in.
+
+    def test_owner_login_wrong_attestation_rejected(self, _client, _secret_present):
+        self._seed_secret_var()
+        resp = _client.post(
+            "/api/env/reveal",
+            json={"key": "TEST_ATTEST_REVEAL"},
+            headers={
+                "X-Hermes-Proxy-Auth": "wrong-secret",
+                "Tailscale-User-Login": self._OWNER_LOGIN,
+            },
+        )
+        assert resp.status_code == 401
+
+    def test_owner_login_empty_attestation_rejected(self, _client, _secret_present):
+        self._seed_secret_var()
+        resp = _client.post(
+            "/api/env/reveal",
+            json={"key": "TEST_ATTEST_REVEAL"},
+            headers={
+                "X-Hermes-Proxy-Auth": "",
+                "Tailscale-User-Login": self._OWNER_LOGIN,
+            },
+        )
+        assert resp.status_code == 401
+
+    def test_owner_login_no_attestation_header_rejected(self, _client, _secret_present):
+        self._seed_secret_var()
+        resp = _client.post(
+            "/api/env/reveal",
+            json={"key": "TEST_ATTEST_REVEAL"},
+            headers={"Tailscale-User-Login": self._OWNER_LOGIN},
+        )
+        assert resp.status_code == 401
+
+    # ── (d) secret file ABSENT -> rejected (fail-closed) ────────────────
+    #        MUTATION-PROVE: treating absence as trust lets the owner in.
+
+    def test_absent_secret_file_owner_login_rejected(self, _client, _secret_absent):
+        self._seed_secret_var()
+        resp = _client.post(
+            "/api/env/reveal",
+            json={"key": "TEST_ATTEST_REVEAL"},
+            headers={
+                "X-Hermes-Proxy-Auth": "anything-at-all",
+                "Tailscale-User-Login": self._OWNER_LOGIN,
+            },
+        )
+        assert resp.status_code == 401
+
+    def test_absent_secret_file_blocks_middleware_path(self, _client, _secret_absent):
+        from hermes_constants import get_hermes_home
+
+        img_dir = get_hermes_home() / "images"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        img = img_dir / "shot.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+
+        resp = _client.get(
+            "/api/media",
+            params={"path": str(img)},
+            headers={
+                "X-Hermes-Proxy-Auth": "anything-at-all",
+                "Tailscale-User-Login": self._OWNER_LOGIN,
+            },
+        )
+        assert resp.status_code == 401
+
+    # ── (e) existing session token still authenticates (no regression) ──
+
+    def test_session_token_still_authenticates_with_secret_present(
+        self, _client, _secret_present
+    ):
+        from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN
+
+        self._seed_secret_var()
+        resp = _client.post(
+            "/api/env/reveal",
+            json={"key": "TEST_ATTEST_REVEAL"},
+            headers={_SESSION_HEADER_NAME: _SESSION_TOKEN},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["value"] == "super-secret-attested"
+
+    def test_session_token_still_authenticates_with_secret_absent(
+        self, _client, _secret_absent
+    ):
+        from hermes_cli.web_server import _SESSION_HEADER_NAME, _SESSION_TOKEN
+
+        self._seed_secret_var()
+        resp = _client.post(
+            "/api/env/reveal",
+            json={"key": "TEST_ATTEST_REVEAL"},
+            headers={_SESSION_HEADER_NAME: _SESSION_TOKEN},
+        )
+        assert resp.status_code == 200
+
+    # ── (f) constant-time compare (hmac.compare_digest, not ==) ─────────
+
+    def test_attestation_uses_constant_time_compare(
+        self, monkeypatch, _secret_present
+    ):
+        import hermes_cli.web_server as ws
+        from types import SimpleNamespace
+
+        calls = []
+        real = ws.hmac.compare_digest
+
+        def _spy(a, b):
+            calls.append((a, b))
+            return real(a, b)
+
+        monkeypatch.setattr(ws.hmac, "compare_digest", _spy)
+
+        request = SimpleNamespace(
+            headers={
+                "X-Hermes-Proxy-Auth": self._SECRET,
+                "Tailscale-User-Login": self._OWNER_LOGIN,
+            }
+        )
+        assert ws._has_valid_proxy_attested_identity(request) is True
+        assert any(
+            self._SECRET.encode() in (a, b) for (a, b) in calls
+        ), "attestation secret was not compared via hmac.compare_digest"
+
+    # ── secret-never-logged guard ───────────────────────────────────────
+
+    def test_loading_secret_does_not_log_it(self, _secret_present, caplog):
+        import logging
+        import hermes_cli.web_server as ws
+
+        with caplog.at_level(logging.DEBUG):
+            ws._reset_proxy_attestation_cache()
+            assert ws._load_proxy_attestation_secret() == self._SECRET
+        assert self._SECRET not in caplog.text
+
+    # ── caching: file read once ─────────────────────────────────────────
+
+    def test_secret_is_cached_after_first_read(self, _secret_present):
+        import hermes_cli.web_server as ws
+
+        ws._reset_proxy_attestation_cache()
+        first = ws._load_proxy_attestation_secret()
+        # Delete the file; a cached read must still return the value.
+        _secret_present.unlink()
+        assert ws._load_proxy_attestation_secret() == first
+
+    def test_absent_secret_cached_as_none(self, _secret_absent):
+        import hermes_cli.web_server as ws
+
+        ws._reset_proxy_attestation_cache()
+        assert ws._load_proxy_attestation_secret() is None
+        # Still None on a second call (cached absence), not a re-stat surprise.
+        assert ws._load_proxy_attestation_secret() is None

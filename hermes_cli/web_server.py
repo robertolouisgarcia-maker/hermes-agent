@@ -245,9 +245,120 @@ def _has_valid_session_token(request: Request) -> bool:
     return hmac.compare_digest(auth.encode(), expected.encode())
 
 
+# ---------------------------------------------------------------------------
+# Proxy-attested Tailscale identity (CC-A5 part 2).
+#
+# Part 1 (loopback proxy, PH repo) strips any inbound ``Tailscale-User-*``
+# headers from the client and re-injects the operator's *real* tailnet
+# identity together with ``X-Hermes-Proxy-Auth: <secret>`` read from a 0600
+# file at ``~/.hermes/dashboard-proxy-attest.token``.  Only the proxy knows
+# that secret, so a matching ``X-Hermes-Proxy-Auth`` is proof the request
+# traversed the trusted proxy and the accompanying ``Tailscale-User-Login`` is
+# authentic (not a header a hostile client forged).
+#
+# This makes the dashboard backend ACCEPT that attested identity as an
+# alternative to the session token — but ONLY when (a) the attestation secret
+# matches in constant time AND (b) the identity is on the owner allowlist.
+# The phone on the tailnet then skips the token prompt; token mode stays the
+# fallback.
+#
+# FAIL CLOSED: when the secret file is absent we return None and identity auth
+# is DISABLED — a missing attestation must NEVER be read as "trust the
+# header".  ``Tailscale-User-Login`` is never trusted without a secret match.
+# The secret is never logged.
+# ---------------------------------------------------------------------------
+_PROXY_ATTEST_TOKEN_PATH = os.path.expanduser("~/.hermes/dashboard-proxy-attest.token")
+
+# Lowercased owner identities allowed to authenticate via the attested header.
+_OWNER_IDENTITY_ALLOWLIST = frozenset({"robertolouisgarcia@gmail.com"})
+
+# Module-level cache: read the secret file once.  ``_UNREAD`` distinguishes
+# "not yet loaded" from a legitimately cached ``None`` (file absent), so an
+# absent file is still only stat'd once.  Tests reset via
+# ``_reset_proxy_attestation_cache()``.
+_PROXY_ATTEST_UNREAD = object()
+_proxy_attest_secret_cache: Any = _PROXY_ATTEST_UNREAD
+
+
+def _reset_proxy_attestation_cache() -> None:
+    """Drop the cached attestation secret so the next read re-stats the file.
+
+    Test seam only — production reads the file once per process.
+    """
+    global _proxy_attest_secret_cache
+    _proxy_attest_secret_cache = _PROXY_ATTEST_UNREAD
+
+
+def _load_proxy_attestation_secret() -> Optional[str]:
+    """Return the trimmed proxy-attestation secret, or None when unavailable.
+
+    Reads ``_PROXY_ATTEST_TOKEN_PATH`` once and caches the result (including a
+    cached None when the file is absent / not a regular file).  Any read error
+    is treated as absence — fail closed.  The secret is NEVER logged.
+    """
+    global _proxy_attest_secret_cache
+    if _proxy_attest_secret_cache is not _PROXY_ATTEST_UNREAD:
+        return _proxy_attest_secret_cache
+
+    secret: Optional[str] = None
+    try:
+        path = Path(_PROXY_ATTEST_TOKEN_PATH)
+        # Regular-file check guards against a dir / fifo / dangling symlink.
+        if path.is_file():
+            contents = path.read_text(encoding="utf-8").strip()
+            # An empty file is treated as absence so a truncated/cleared token
+            # can never match an empty forged header.
+            secret = contents or None
+    except OSError:
+        secret = None
+
+    _proxy_attest_secret_cache = secret
+    return secret
+
+
+def _has_valid_proxy_attested_identity(request: Request) -> bool:
+    """True iff the request carries a valid proxy-attested OWNER identity.
+
+    Requires ALL of:
+      * the attestation secret file exists and loaded (else fail closed),
+      * a non-empty ``X-Hermes-Proxy-Auth`` header that matches the secret in
+        CONSTANT TIME (``hmac.compare_digest``), and
+      * a ``Tailscale-User-Login`` on the owner allowlist (case-insensitive).
+
+    A missing secret file disables this path entirely; the header is never
+    trusted on its own.
+    """
+    secret = _load_proxy_attestation_secret()
+    if secret is None:
+        return False
+
+    attn = request.headers.get("X-Hermes-Proxy-Auth", "")
+    if attn == "":
+        return False
+    if not hmac.compare_digest(attn.encode(), secret.encode()):
+        return False
+
+    login = request.headers.get("Tailscale-User-Login", "")
+    return login.strip().lower() in _OWNER_IDENTITY_ALLOWLIST
+
+
+def _is_request_authenticated(request: Request) -> bool:
+    """True when the request carries EITHER accepted token-path credential.
+
+    The two credentials are alternatives on the loopback/token path:
+      * a valid dashboard session token, or
+      * a valid proxy-attested owner identity (zero-touch on the tailnet).
+    """
+    return _has_valid_session_token(request) or _has_valid_proxy_attested_identity(request)
+
+
 def _require_token(request: Request) -> None:
-    """Validate the ephemeral session token.  Raises 401 on mismatch."""
-    if not _has_valid_session_token(request):
+    """Validate the token-path credential.  Raises 401 on mismatch.
+
+    Accepts either the ephemeral session token or a valid proxy-attested owner
+    identity (see :func:`_is_request_authenticated`).
+    """
+    if not _is_request_authenticated(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -377,7 +488,7 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
     path = request.url.path
     if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
-        if not _has_valid_session_token(request):
+        if not _is_request_authenticated(request):
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Unauthorized"},
@@ -8526,6 +8637,16 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
                 path=ws.url.path,
             )
             return "ticket_invalid", "ticket"
+
+    # Proxy-attested owner identity (CC-A5 part 2): the loopback proxy injects
+    # X-Hermes-Proxy-Auth + Tailscale-User-Login on the WS upgrade just as it
+    # does on REST requests, so the same attested-identity credential is
+    # accepted here.  Gated by the same constant-time secret match + owner
+    # allowlist, and fail-closed when the secret file is absent.  This is an
+    # ADDITIONAL credential on the token path; the legacy ?token= path is
+    # unchanged.  Checked before ?token= so the phone needs no token at all.
+    if _has_valid_proxy_attested_identity(ws):
+        return None, "proxy_identity"
 
     token = ws.query_params.get("token", "")
     if not token:

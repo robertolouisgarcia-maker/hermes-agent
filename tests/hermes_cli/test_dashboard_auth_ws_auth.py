@@ -567,3 +567,151 @@ class TestGatewayWsUrl:
             assert web_server._build_gateway_ws_url() is None
         finally:
             web_server.app.state.bound_host = "fly-app.fly.dev"
+
+
+# ---------------------------------------------------------------------------
+# CC-A5 part 2: proxy-attested Tailscale identity on the WS upgrade.
+#
+# The loopback proxy injects ``X-Hermes-Proxy-Auth: <secret>`` +
+# ``Tailscale-User-Login: <owner>`` on the upgrade.  When the secret matches
+# (constant-time) AND the login is the owner, the WS upgrade authenticates with
+# no ``?token=`` at all (zero-touch on the tailnet).  Fail closed when the
+# secret file is absent; never trust the login header without the secret match.
+# ---------------------------------------------------------------------------
+
+_OWNER_LOGIN = "robertolouisgarcia@gmail.com"
+_ATTEST_SECRET = "proxy-attest-secret-value-abc123"
+
+
+def _attest_ws(*, attn, login, token=None):
+    """A loopback _fake_ws carrying proxy-attest + Tailscale identity headers."""
+    query = {"token": token} if token is not None else {}
+    ws = _fake_ws(query=query, path="/api/ws")
+    headers = {}
+    if attn is not None:
+        headers["X-Hermes-Proxy-Auth"] = attn
+    if login is not None:
+        headers["Tailscale-User-Login"] = login
+    ws.headers = headers
+    return ws
+
+
+@pytest.fixture
+def attest_secret_present(monkeypatch, tmp_path):
+    """Write a known attestation secret to a tmp file the module points at."""
+    token_file = tmp_path / "dashboard-proxy-attest.token"
+    token_file.write_text(_ATTEST_SECRET + "\n", encoding="utf-8")
+    monkeypatch.setattr(web_server, "_PROXY_ATTEST_TOKEN_PATH", str(token_file))
+    web_server._reset_proxy_attestation_cache()
+    yield token_file
+    web_server._reset_proxy_attestation_cache()
+
+
+@pytest.fixture
+def attest_secret_absent(monkeypatch, tmp_path):
+    """Point the module at a NON-EXISTENT token path (fail-closed scenario)."""
+    missing = tmp_path / "does-not-exist.token"
+    monkeypatch.setattr(web_server, "_PROXY_ATTEST_TOKEN_PATH", str(missing))
+    web_server._reset_proxy_attestation_cache()
+    yield missing
+    web_server._reset_proxy_attestation_cache()
+
+
+class TestWsProxyAttestedIdentity:
+    """Loopback WS upgrade accepts the proxy-attested owner identity."""
+
+    def test_matching_attestation_owner_login_accepted(
+        self, loopback_app, attest_secret_present
+    ):
+        # (a) matching secret + owner login -> authenticated, no ?token=.
+        ws = _attest_ws(attn=_ATTEST_SECRET, login=_OWNER_LOGIN)
+        assert web_server._ws_auth_ok(ws) is True
+
+    def test_matching_attestation_owner_login_credential_label(
+        self, loopback_app, attest_secret_present
+    ):
+        ws = _attest_ws(attn=_ATTEST_SECRET, login=_OWNER_LOGIN)
+        reason, credential = web_server._ws_auth_reason(ws)
+        assert reason is None
+        assert credential == "proxy_identity"
+
+    def test_owner_login_case_insensitive(self, loopback_app, attest_secret_present):
+        ws = _attest_ws(attn=_ATTEST_SECRET, login="  ROBERTOLouisGarcia@Gmail.com ")
+        assert web_server._ws_auth_ok(ws) is True
+
+    def test_matching_attestation_non_owner_login_rejected(
+        self, loopback_app, attest_secret_present
+    ):
+        # (b) matching secret but a NON-owner login must be rejected.
+        ws = _attest_ws(attn=_ATTEST_SECRET, login="attacker@evil.test")
+        assert web_server._ws_auth_ok(ws) is False
+
+    def test_owner_login_wrong_attestation_rejected(
+        self, loopback_app, attest_secret_present
+    ):
+        # (c) owner login but WRONG attestation -> rejected. MUTATION-PROVE:
+        # if the attn compare were dropped, this forged login would auth.
+        ws = _attest_ws(attn="totally-wrong-secret", login=_OWNER_LOGIN)
+        assert web_server._ws_auth_ok(ws) is False
+
+    def test_owner_login_empty_attestation_rejected(
+        self, loopback_app, attest_secret_present
+    ):
+        ws = _attest_ws(attn="", login=_OWNER_LOGIN)
+        assert web_server._ws_auth_ok(ws) is False
+
+    def test_owner_login_missing_attestation_header_rejected(
+        self, loopback_app, attest_secret_present
+    ):
+        ws = _attest_ws(attn=None, login=_OWNER_LOGIN)
+        assert web_server._ws_auth_ok(ws) is False
+
+    def test_absent_secret_file_owner_login_rejected(
+        self, loopback_app, attest_secret_absent
+    ):
+        # (d) FAIL CLOSED: secret file absent -> owner login + any attn rejected.
+        # MUTATION-PROVE: if absence were treated as trust, this would auth.
+        ws = _attest_ws(attn="anything-at-all", login=_OWNER_LOGIN)
+        assert web_server._ws_auth_ok(ws) is False
+
+    def test_absent_secret_file_owner_login_blank_attn_rejected(
+        self, loopback_app, attest_secret_absent
+    ):
+        ws = _attest_ws(attn="", login=_OWNER_LOGIN)
+        assert web_server._ws_auth_ok(ws) is False
+
+    def test_attestation_not_accepted_in_gated_mode(
+        self, gated_app, attest_secret_present
+    ):
+        """Gated (OAuth) mode is unchanged: a valid attested identity must NOT
+        bypass the single-use ticket gate — only ?ticket=/?internal= work."""
+        ws = _attest_ws(attn=_ATTEST_SECRET, login=_OWNER_LOGIN)
+        # _fake_ws/gated path reads query_params for ticket/internal; no ticket.
+        assert web_server._ws_auth_ok(ws) is False
+
+    def test_valid_session_token_still_authenticates(
+        self, loopback_app, attest_secret_present
+    ):
+        # (e) no regression: the legacy ?token= path still works even with the
+        # attestation file present (headers absent here).
+        ws = _fake_ws(query={"token": web_server._SESSION_TOKEN}, path="/api/ws")
+        ws.headers = {}
+        assert web_server._ws_auth_ok(ws) is True
+
+    def test_uses_constant_time_compare(self, loopback_app, attest_secret_present, monkeypatch):
+        # (f) the attestation compare must use hmac.compare_digest (constant
+        # time), not ==.  Spy on compare_digest and assert it was invoked with
+        # the attestation bytes; a plain == would never call it.
+        calls = []
+        real = web_server.hmac.compare_digest
+
+        def _spy(a, b):
+            calls.append((a, b))
+            return real(a, b)
+
+        monkeypatch.setattr(web_server.hmac, "compare_digest", _spy)
+        ws = _attest_ws(attn=_ATTEST_SECRET, login=_OWNER_LOGIN)
+        assert web_server._ws_auth_ok(ws) is True
+        assert any(
+            _ATTEST_SECRET.encode() in (a, b) for (a, b) in calls
+        ), "attestation secret was not compared via hmac.compare_digest"
