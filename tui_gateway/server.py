@@ -176,6 +176,8 @@ _LONG_HANDLERS = frozenset(
         "browser.manage",
         "cli.exec",
         "conductor.cockpit.get",
+        "conductor.dryRun",
+        "conductor.execute",
         "conductor.missions.list",
         "conductor.receipts.tail",
         "conductor.systemcheck",
@@ -6395,6 +6397,193 @@ def _(rid, params: dict) -> dict:
     if isinstance(result, dict) and result.get("ok") is False:
         return _ok(rid, result)
     return _ok(rid, {"ok": True, "report": result})
+
+
+# -- Methods: conductor drive + approve (CC-C / CC-D2-D3) --------------
+#
+# These make the read-only cockpit INTERACTIVE: preview a conduct mission (a DRY
+# plan), then with an explicit OWNER CONFIRM, run it. The owner-confirm IS the
+# Phase-2 approval. SAFETY MODEL: the conductor execute is real, but the FIXTURE
+# mission the runner builds is personal_private -> LOCAL lane only -> FREE (no
+# frontier spend; frontier needs a SEPARATE owner-frontier-approval that is NOT
+# granted here). The conduct CLI is itself owner-gated (it requires
+# --owner-approved + --approval-id) and the conductor governance floors gate all
+# spend/effects. We NEVER pass any frontier flag from the gateway.
+#
+# conductor.dryRun is read-only-ish: the dry plan never spawns / spends per the
+# runner's own design (mock runners, no LM Studio). conductor.execute spawns the
+# live run DETACHED / NON-BLOCKING and returns immediately - the receipt appears
+# via the cockpit poll when the run completes. Both keep the cockpit posture:
+# ARGV LIST (never shell=True), no leaked stderr/argv/paths, never raises; on any
+# failure a {"ok": False, "reason": "conduct_<dryrun|execute>_<kind>"} envelope.
+
+_DEFAULT_CONDUCT_RUNNER = (
+    "/Users/robert/Projects/personal-hermes-os/scripts/"
+    "run-developer-os-conduct-local.mjs"
+)
+_CONDUCT_DRY_TIMEOUT_S = 60
+
+
+def _resolve_conduct_runner_path() -> str:
+    return os.environ.get("HERMES_CONDUCT_RUNNER", _DEFAULT_CONDUCT_RUNNER)
+
+
+def _default_conduct_dry_runner(argv: list[str], timeout: int) -> dict:
+    """Real DRY runner: subprocess-invoke the PH conduct CLI with --json.
+
+    *argv* is an ARGV LIST ([node, runner_path, "--json"]); never shell=True, so
+    there is no shell-injection surface. The CLI pretty-prints its plan as
+    multi-line JSON to stdout. The dry plan is side-effect-free by design (mock
+    runners, no spawn, no spend). The parse order mirrors the self-check runner:
+      1. parse the ENTIRE stdout as JSON (the pretty-printed plan), else
+      2. parse the LAST non-empty stdout line (warm-up-noise tolerant).
+    On timeout / not-found / empty / unparseable this returns
+    {"ok": False, "reason": "conduct_dryrun_<kind>"} and NEVER includes stderr or
+    the argv (they could carry paths/creds).
+    """
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "conduct_dryrun_timeout"}
+    except FileNotFoundError:
+        return {"ok": False, "reason": "conduct_dryrun_not_found"}
+    except Exception:
+        return {"ok": False, "reason": "conduct_dryrun_error"}
+
+    stdout = completed.stdout or ""
+    parsed = _parse_self_check_stdout(stdout)
+    if parsed is not None:
+        return parsed
+
+    lines = [ln for ln in stdout.splitlines() if ln.strip()]
+    if not lines:
+        return {"ok": False, "reason": "conduct_dryrun_empty"}
+    return {"ok": False, "reason": "conduct_dryrun_parse"}
+
+
+# Injectable hook so tests can substitute a fake runner without spawning node.
+_conduct_dry_runner = _default_conduct_dry_runner
+
+
+def _run_conduct_dry() -> dict:
+    """Build the ARGV LIST and invoke the (injectable) DRY conduct runner.
+
+    Always returns a dict (the parsed plan, or a conduct_dryrun_* reason); never
+    raises and never uses shell=True. NEVER passes --execute / --owner-approved /
+    any frontier flag - this is the side-effect-free preview path.
+    """
+    argv = [
+        _resolve_node(),
+        _resolve_conduct_runner_path(),
+        "--json",
+    ]
+    try:
+        return _conduct_dry_runner(argv, timeout=_CONDUCT_DRY_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "conduct_dryrun_timeout"}
+    except FileNotFoundError:
+        return {"ok": False, "reason": "conduct_dryrun_not_found"}
+    except Exception:
+        return {"ok": False, "reason": "conduct_dryrun_error"}
+
+
+@method("conductor.dryRun")
+def _(rid, params: dict) -> dict:
+    """Run the conduct DRY plan and return it for the cockpit drive preview.
+
+    Wraps a parsed plan as {"ok": True, "plan": <plan>}; a runner failure rides
+    back as the {"ok": False, "reason": "conduct_dryrun_*"} envelope (the RPC
+    itself still succeeds so the renderer can show an ErrorState).
+    """
+    result = _run_conduct_dry()
+    if isinstance(result, dict) and result.get("ok") is False:
+        return _ok(rid, result)
+    return _ok(rid, {"ok": True, "plan": result})
+
+
+def _build_conduct_execute_argv(approval_id: str, *, mock_model: bool) -> list[str]:
+    """The single authority for the OWNER-CONFIRMED live execute command line.
+
+    Returns an ARGV LIST that is owner-gated and LOCAL-ONLY: it always carries
+    --execute --owner-approved --approval-id <id> and --emit-receipt-to-neon (so
+    the receipt flows back into the cockpit), optionally --mock-model for a
+    no-LM-Studio safe run, and NEVER any frontier flag. Frontier spend needs a
+    SEPARATE owner-frontier-approval that is not granted on this path.
+    """
+    argv = [
+        _resolve_node(),
+        _resolve_conduct_runner_path(),
+        "--execute",
+        "--owner-approved",
+        "--approval-id",
+        approval_id,
+        "--emit-receipt-to-neon",
+    ]
+    if mock_model:
+        argv.append("--mock-model")
+    return argv
+
+
+def _default_conduct_execute_spawn(argv: list[str]) -> None:
+    """Real spawn: launch the conductor execute DETACHED / NON-BLOCKING.
+
+    *argv* is an ARGV LIST; never shell=True. The child runs in its OWN session
+    (start_new_session=True) so it survives the gateway thread, with stdout +
+    stderr to DEVNULL (the receipt flows back via Neon + the cockpit poll, not
+    our pipe). We do NOT wait() - the gateway thread must never block on the
+    ~30-60s run.
+    """
+    subprocess.Popen(  # noqa: S603 - argv LIST, never shell=True
+        argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+# Injectable hook so tests can assert the spawn without launching node.
+_conduct_execute_spawn = _default_conduct_execute_spawn
+
+
+@method("conductor.execute")
+def _(rid, params: dict) -> dict:
+    """The OWNER-CONFIRMED live conduct run (DETACHED, LOCAL-ONLY, free).
+
+    REQUIRES params["ownerConfirmed"] is True (strict, not Python-truthy) - the
+    owner-confirm IS the Phase-2 approval. Without it this returns 4003 and
+    spawns NOTHING. With it, it generates/accepts an approvalId, spawns the
+    conductor execute DETACHED via the injectable hook, and returns IMMEDIATELY
+    {"ok": True, "started": True, "approvalId": <id>} without awaiting the run -
+    the receipt surfaces via the cockpit poll when the run completes. A spawn
+    failure rides back as {"ok": False, "reason": "conduct_execute_*"} (never
+    leaking argv/paths). NEVER passes any frontier flag.
+    """
+    if params.get("ownerConfirmed") is not True:
+        return _err(rid, 4003, "owner confirmation required")
+
+    # Accept a caller-supplied approvalId, else synthesize one from os.urandom
+    # (no clock dependency). The id is opaque and rides the owner-gated CLI flag.
+    raw_id = params.get("approvalId")
+    approval_id = raw_id.strip() if isinstance(raw_id, str) and raw_id.strip() else ""
+    if not approval_id:
+        approval_id = "cockpit-" + os.urandom(8).hex()
+
+    mock_model = params.get("mockModel") is True
+    argv = _build_conduct_execute_argv(approval_id, mock_model=mock_model)
+
+    try:
+        _conduct_execute_spawn(argv)
+    except Exception:
+        # Never leak the exception text (could carry paths/creds) or the argv.
+        return _ok(rid, {"ok": False, "reason": "conduct_execute_error"})
+
+    return _ok(rid, {"ok": True, "started": True, "approvalId": approval_id})
 
 
 # ── Methods: config ──────────────────────────────────────────────────

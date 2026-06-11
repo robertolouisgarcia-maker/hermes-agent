@@ -387,3 +387,242 @@ describe('ConductorView', () => {
     expect(screen.queryByText('System health')).toBeNull()
   })
 })
+
+// -- Drive + approve flow (CC-C / CC-D2-D3) ---------------------------
+
+function dryPlan() {
+  return {
+    ok: true,
+    plan: {
+      valid: true,
+      reason: 'developer_os_conduct_ready',
+      mode: 'dry',
+      agents: [
+        { role: 'implementer', lane: 'local', provider: 'lmstudio' },
+        { role: 'judge', lane: 'local', provider: 'lmstudio' }
+      ]
+    }
+  }
+}
+
+async function openDrivePanel() {
+  // The "New run" entry tops the sidebar; clicking it opens the drive dialog.
+  await waitFor(() => {
+    expect(screen.getByText('New run')).toBeTruthy()
+  })
+  fireEvent.click(screen.getByText('New run'))
+  await waitFor(() => {
+    expect(screen.getByText('Drive a conduct')).toBeTruthy()
+  })
+}
+
+describe('ConductorView drive + approve', () => {
+  it('renders the New run entry and opens the drive dialog', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: [] }
+      }
+
+      if (method === 'conductor.systemcheck') {
+        return readyMatrix()
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+    await openDrivePanel()
+
+    // The local-only / free hint is obvious in the panel.
+    expect(screen.getByText('Runs locally and free. No frontier model is triggered.')).toBeTruthy()
+  })
+
+  it('Preview calls conductor.dryRun and renders the plan agents + lanes + reason', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: [] }
+      }
+
+      if (method === 'conductor.systemcheck') {
+        return readyMatrix()
+      }
+
+      if (method === 'conductor.dryRun') {
+        return dryPlan()
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+    await openDrivePanel()
+
+    fireEvent.click(screen.getByText('Preview'))
+
+    await waitFor(() => {
+      expect(requestGateway).toHaveBeenCalledWith('conductor.dryRun', expect.any(Object))
+    })
+
+    // The plan's agents (role) + lanes + reason render.
+    await waitFor(() => {
+      expect(screen.getByText('implementer')).toBeTruthy()
+    })
+    expect(screen.getByText('judge')).toBeTruthy()
+    expect(screen.getAllByText('Lane: local').length).toBe(2)
+    expect(screen.getByText('developer_os_conduct_ready')).toBeTruthy()
+  })
+
+  it('the Run button is disabled until the owner confirm is checked', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: [] }
+      }
+
+      if (method === 'conductor.systemcheck') {
+        return readyMatrix()
+      }
+
+      if (method === 'conductor.dryRun') {
+        return dryPlan()
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+    await openDrivePanel()
+
+    fireEvent.click(screen.getByText('Preview'))
+    await waitFor(() => {
+      expect(screen.getByText('implementer')).toBeTruthy()
+    })
+
+    // The Run button exists but is disabled before the confirm checkbox is on.
+    const runButton = screen.getByRole('button', { name: 'Run' })
+    expect((runButton as HTMLButtonElement).disabled).toBe(true)
+
+    // conductor.execute must NOT have been called yet.
+    expect(requestGateway).not.toHaveBeenCalledWith('conductor.execute', expect.anything())
+  })
+
+  it('checking confirm + clicking Run calls conductor.execute with ownerConfirmed:true', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: [] }
+      }
+
+      if (method === 'conductor.systemcheck') {
+        return readyMatrix()
+      }
+
+      if (method === 'conductor.dryRun') {
+        return dryPlan()
+      }
+
+      if (method === 'conductor.execute') {
+        return { ok: true, started: true, approvalId: 'cockpit-abc' }
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+    await openDrivePanel()
+
+    fireEvent.click(screen.getByText('Preview'))
+    await waitFor(() => {
+      expect(screen.getByText('implementer')).toBeTruthy()
+    })
+
+    // Toggle the owner-approval confirm checkbox.
+    const confirm = screen.getByRole('checkbox', { name: 'I approve running this conduct locally' })
+    fireEvent.click(confirm)
+
+    // Now Run is enabled; click it.
+    const runButton = screen.getByRole('button', { name: 'Run' })
+    await waitFor(() => {
+      expect((runButton as HTMLButtonElement).disabled).toBe(false)
+    })
+    fireEvent.click(runButton)
+
+    await waitFor(() => {
+      expect(requestGateway).toHaveBeenCalledWith(
+        'conductor.execute',
+        expect.objectContaining({ ownerConfirmed: true })
+      )
+    })
+
+    // The started state surfaces (with the approval id).
+    await waitFor(() => {
+      expect(screen.getByText('Run started')).toBeTruthy()
+    })
+  })
+
+  it('a dryRun ok:false shows the preview error state', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: [] }
+      }
+
+      if (method === 'conductor.systemcheck') {
+        return readyMatrix()
+      }
+
+      if (method === 'conductor.dryRun') {
+        return { ok: false, reason: 'conduct_dryrun_timeout' }
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+    await openDrivePanel()
+
+    fireEvent.click(screen.getByText('Preview'))
+
+    await waitFor(() => {
+      expect(screen.getByText('Could not preview')).toBeTruthy()
+    })
+  })
+
+  it('an execute ok:false shows the run error state', async () => {
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: [] }
+      }
+
+      if (method === 'conductor.systemcheck') {
+        return readyMatrix()
+      }
+
+      if (method === 'conductor.dryRun') {
+        return dryPlan()
+      }
+
+      if (method === 'conductor.execute') {
+        return { ok: false, reason: 'conduct_execute_error' }
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+    await openDrivePanel()
+
+    fireEvent.click(screen.getByText('Preview'))
+    await waitFor(() => {
+      expect(screen.getByText('implementer')).toBeTruthy()
+    })
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'I approve running this conduct locally' }))
+    const runButton = screen.getByRole('button', { name: 'Run' })
+    await waitFor(() => {
+      expect((runButton as HTMLButtonElement).disabled).toBe(false)
+    })
+    fireEvent.click(runButton)
+
+    await waitFor(() => {
+      expect(screen.getByText('Could not start')).toBeTruthy()
+    })
+  })
+})

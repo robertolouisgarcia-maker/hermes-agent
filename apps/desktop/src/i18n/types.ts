@@ -825,6 +825,35 @@ export interface Translations {
       empty: string
       emptyDesc: string
     }
+    drive: {
+      newRun: string
+      title: string
+      intro: string
+      localHint: string
+      preview: string
+      previewing: string
+      previewAgain: string
+      previewError: string
+      previewErrorDesc: string
+      noPlan: string
+      noPlanDesc: string
+      planTitle: string
+      planReason: string
+      agents: string
+      noAgents: string
+      laneLabel: (lane: string) => string
+      confirmTitle: string
+      confirm: string
+      run: string
+      running: string
+      runError: string
+      runErrorDesc: string
+      started: string
+      startedDesc: string
+      startedApproval: (approvalId: string) => string
+      close: string
+      done: string
+    }
   }
 
   artifacts: {

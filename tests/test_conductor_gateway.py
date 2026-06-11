@@ -550,3 +550,444 @@ def test_run_self_check_honors_env_runner_path(monkeypatch):
     server._run_self_check()
 
     assert captured["argv"][1] == "/custom/self-check.mjs"
+
+
+# -- conductor.dryRun (drive PREVIEW, read-only-ish, SAFE) ------------
+#
+# The dry plan never spawns / spends per the runner's own design (mock runners,
+# no LM Studio). The gateway proxies it exactly like the cockpit tools: an ARGV
+# LIST (never shell=True), injectable runner, never raises, no leaked argv/paths.
+
+
+def _make_dry_runner(result):
+    """Return (runner, calls) recording every argv passed to the dry runner."""
+    calls: list[list[str]] = []
+
+    def _runner(argv, timeout):  # noqa: ANN001
+        calls.append(list(argv))
+        return result
+
+    return _runner, calls
+
+
+_DRY_PLAN = {
+    "valid": True,
+    "reason": "developer_os_conduct_ready",
+    "mode": "dry",
+    "realmIsPrivate": True,
+    "agents": [
+        {"role": "implementer", "lane": "local", "provider": "lmstudio"},
+        {"role": "judge", "lane": "local", "provider": "lmstudio"},
+    ],
+}
+
+
+def test_dryrun_method_is_registered():
+    assert "conductor.dryRun" in server._methods
+    assert callable(server._methods["conductor.dryRun"])
+
+
+def test_dryrun_routed_into_long_handlers():
+    # It subprocess-invokes node, so it must dispatch on the long-handler pool.
+    assert "conductor.dryRun" in server._LONG_HANDLERS
+
+
+def test_dryrun_returns_plan_via_injected_runner(monkeypatch):
+    runner, calls = _make_dry_runner(_DRY_PLAN)
+    monkeypatch.setattr(server, "_conduct_dry_runner", runner)
+
+    resp = server._methods["conductor.dryRun"]("r1", {})
+
+    assert "error" not in resp
+    assert resp["result"] == {"ok": True, "plan": _DRY_PLAN}
+    # The plan rides under `plan` verbatim (agents + their lanes preserved).
+    assert resp["result"]["plan"]["agents"][0]["role"] == "implementer"
+    assert resp["result"]["plan"]["agents"][0]["lane"] == "local"
+
+
+def test_dryrun_uses_argv_list_with_json_flag_no_shell(monkeypatch):
+    runner, calls = _make_dry_runner(_DRY_PLAN)
+    monkeypatch.setattr(server, "_conduct_dry_runner", runner)
+
+    server._methods["conductor.dryRun"]("r1", {})
+
+    argv = calls[0]
+    assert isinstance(argv, list)
+    # [node, runner_path, "--json"] - discrete list elements, never a shell str.
+    assert argv[-1] == "--json"
+    # NEVER a frontier / execute flag on the dry path.
+    assert "--execute" not in argv
+    assert "--owner-approved" not in argv
+    assert not any("frontier" in str(a).lower() for a in argv)
+
+
+def test_dryrun_maps_runner_failure_to_reason(monkeypatch):
+    runner, _ = _make_dry_runner({"ok": False, "reason": "conduct_dryrun_timeout"})
+    monkeypatch.setattr(server, "_conduct_dry_runner", runner)
+
+    resp = server._methods["conductor.dryRun"]("r1", {})
+
+    # The RPC itself succeeded -> _ok envelope; the failure reason rides inside.
+    assert "result" in resp
+    assert "error" not in resp
+    assert resp["result"] == {"ok": False, "reason": "conduct_dryrun_timeout"}
+
+
+def test_dryrun_timeout_maps_to_reason(monkeypatch):
+    import subprocess
+
+    def _boom(argv, timeout):  # noqa: ANN001
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
+
+    monkeypatch.setattr(server, "_conduct_dry_runner", _boom)
+
+    resp = server._methods["conductor.dryRun"]("r1", {})
+
+    assert resp["result"]["ok"] is False
+    assert resp["result"]["reason"] == "conduct_dryrun_timeout"
+
+
+def test_dryrun_unexpected_exception_does_not_leak(monkeypatch):
+    def _boom(argv, timeout):  # noqa: ANN001
+        raise RuntimeError("kaboom /secret/path/creds")
+
+    monkeypatch.setattr(server, "_conduct_dry_runner", _boom)
+
+    resp = server._methods["conductor.dryRun"]("r1", {})
+
+    assert resp["result"]["ok"] is False
+    assert resp["result"]["reason"] == "conduct_dryrun_error"
+    assert "secret" not in json.dumps(resp["result"])
+    assert "kaboom" not in json.dumps(resp["result"])
+
+
+def test_dryrun_default_runner_parses_multiline_pretty_json(monkeypatch):
+    pretty = json.dumps(_DRY_PLAN, indent=2) + "\n"
+
+    def _fake_run(argv, capture_output, text, timeout):  # noqa: ANN001
+        assert isinstance(argv, list)
+        return _FakeCompleted(stdout=pretty, returncode=0)
+
+    monkeypatch.setattr(server.subprocess, "run", _fake_run)
+
+    result = server._default_conduct_dry_runner(
+        [server._resolve_node(), "/x/conduct.mjs", "--json"], timeout=60
+    )
+
+    assert result["reason"] == "developer_os_conduct_ready"
+    assert result["agents"][0]["role"] == "implementer"
+
+
+def test_dryrun_default_runner_tolerates_leading_warmup_noise(monkeypatch):
+    one_line = json.dumps(_DRY_PLAN)
+
+    def _fake_run(argv, capture_output, text, timeout):  # noqa: ANN001
+        return _FakeCompleted(stdout="warming up\n\n" + one_line + "\n", returncode=0)
+
+    monkeypatch.setattr(server.subprocess, "run", _fake_run)
+
+    result = server._default_conduct_dry_runner(["node", "c.mjs", "--json"], timeout=60)
+
+    assert result["reason"] == "developer_os_conduct_ready"
+
+
+def test_dryrun_default_runner_unparseable_returns_reason(monkeypatch):
+    def _fake_run(argv, capture_output, text, timeout):  # noqa: ANN001
+        return _FakeCompleted(stdout="not json at all\n", returncode=1)
+
+    monkeypatch.setattr(server.subprocess, "run", _fake_run)
+
+    result = server._default_conduct_dry_runner(["node", "c.mjs", "--json"], timeout=60)
+
+    assert result["ok"] is False
+    assert result["reason"] == "conduct_dryrun_parse"
+
+
+def test_dryrun_default_runner_empty_returns_reason(monkeypatch):
+    def _fake_run(argv, capture_output, text, timeout):  # noqa: ANN001
+        return _FakeCompleted(stdout="   \n\n", returncode=0)
+
+    monkeypatch.setattr(server.subprocess, "run", _fake_run)
+
+    result = server._default_conduct_dry_runner(["node", "c.mjs", "--json"], timeout=60)
+
+    assert result["ok"] is False
+    assert result["reason"] == "conduct_dryrun_empty"
+
+
+def test_dryrun_default_runner_timeout_returns_reason(monkeypatch):
+    import subprocess
+
+    def _fake_run(argv, capture_output, text, timeout):  # noqa: ANN001
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
+
+    monkeypatch.setattr(server.subprocess, "run", _fake_run)
+
+    result = server._default_conduct_dry_runner(["node", "c.mjs", "--json"], timeout=60)
+
+    assert result["ok"] is False
+    assert result["reason"] == "conduct_dryrun_timeout"
+
+
+def test_dryrun_default_runner_not_found_returns_reason(monkeypatch):
+    def _fake_run(argv, capture_output, text, timeout):  # noqa: ANN001
+        raise FileNotFoundError("no node here")
+
+    monkeypatch.setattr(server.subprocess, "run", _fake_run)
+
+    result = server._default_conduct_dry_runner(["node", "c.mjs", "--json"], timeout=60)
+
+    assert result["ok"] is False
+    assert result["reason"] == "conduct_dryrun_not_found"
+
+
+def test_run_conduct_dry_builds_argv_list_with_json(monkeypatch):
+    captured = {}
+
+    def _runner(argv, timeout):  # noqa: ANN001
+        captured["argv"] = argv
+        captured["timeout"] = timeout
+        return _DRY_PLAN
+
+    monkeypatch.setattr(server, "_conduct_dry_runner", _runner)
+
+    server._run_conduct_dry()
+
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    assert len(argv) == 3
+    assert argv[2] == "--json"
+    assert captured["timeout"] == 60
+
+
+def test_run_conduct_dry_honors_env_runner_path(monkeypatch):
+    captured = {}
+
+    def _runner(argv, timeout):  # noqa: ANN001
+        captured["argv"] = argv
+        return _DRY_PLAN
+
+    monkeypatch.setattr(server, "_conduct_dry_runner", _runner)
+    monkeypatch.setenv("HERMES_CONDUCT_RUNNER", "/custom/conduct.mjs")
+
+    server._run_conduct_dry()
+
+    assert captured["argv"][1] == "/custom/conduct.mjs"
+
+
+# -- conductor.execute (OWNER-CONFIRMED live run, DETACHED, local-only) -
+#
+# The owner-confirm IS the Phase-2 approval. The handler REQUIRES
+# params.ownerConfirmed === True; otherwise it returns 4003 and spawns NOTHING.
+# When confirmed it spawns the conductor execute DETACHED / NON-BLOCKING via the
+# injectable `_conduct_execute_spawn` hook with an ARGV LIST carrying --execute
+# --owner-approved --approval-id <id> (NEVER a frontier flag) and returns
+# IMMEDIATELY {ok:true, started:true, approvalId} without awaiting the run.
+
+
+def _make_spawn_hook():
+    """Return (spawn, calls) recording every argv the execute spawn was given."""
+    calls: list[list[str]] = []
+
+    def _spawn(argv):  # noqa: ANN001
+        calls.append(list(argv))
+        return None
+
+    return _spawn, calls
+
+
+def test_execute_method_is_registered():
+    assert "conductor.execute" in server._methods
+    assert callable(server._methods["conductor.execute"])
+
+
+def test_execute_routed_into_long_handlers():
+    assert "conductor.execute" in server._LONG_HANDLERS
+
+
+def test_execute_without_owner_confirmed_returns_4003_and_spawns_nothing(monkeypatch):
+    spawn, calls = _make_spawn_hook()
+    monkeypatch.setattr(server, "_conduct_execute_spawn", spawn)
+
+    resp = server._methods["conductor.execute"]("r1", {})
+
+    assert resp["error"]["code"] == 4003
+    assert resp["error"]["message"] == "owner confirmation required"
+    # The spawn hook MUST NOT have been invoked - nothing runs without confirm.
+    assert calls == []
+
+
+def test_execute_owner_confirmed_false_returns_4003_and_spawns_nothing(monkeypatch):
+    spawn, calls = _make_spawn_hook()
+    monkeypatch.setattr(server, "_conduct_execute_spawn", spawn)
+
+    resp = server._methods["conductor.execute"]("r1", {"ownerConfirmed": False})
+
+    assert resp["error"]["code"] == 4003
+    assert calls == []
+
+
+def test_execute_owner_confirmed_truthy_string_still_rejected(monkeypatch):
+    # The gate is `is True` (strict), not Python-truthy: a string MUST NOT pass.
+    spawn, calls = _make_spawn_hook()
+    monkeypatch.setattr(server, "_conduct_execute_spawn", spawn)
+
+    resp = server._methods["conductor.execute"]("r1", {"ownerConfirmed": "true"})
+
+    assert resp["error"]["code"] == 4003
+    assert calls == []
+
+
+def test_execute_owner_confirmed_spawns_argv_list_with_owner_flags(monkeypatch):
+    spawn, calls = _make_spawn_hook()
+    monkeypatch.setattr(server, "_conduct_execute_spawn", spawn)
+
+    resp = server._methods["conductor.execute"](
+        "r1", {"ownerConfirmed": True, "approvalId": "cockpit-test-1"}
+    )
+
+    assert "error" not in resp
+    assert resp["result"]["ok"] is True
+    assert resp["result"]["started"] is True
+    assert resp["result"]["approvalId"] == "cockpit-test-1"
+
+    # The spawn hook ran exactly once with an ARGV LIST (never a shell string).
+    assert len(calls) == 1
+    argv = calls[0]
+    assert isinstance(argv, list)
+    assert "--execute" in argv
+    assert "--owner-approved" in argv
+    assert "--approval-id" in argv
+    # --approval-id is immediately followed by the id value.
+    assert argv[argv.index("--approval-id") + 1] == "cockpit-test-1"
+    assert "--emit-receipt-to-neon" in argv
+
+
+def test_execute_never_passes_a_frontier_flag(monkeypatch):
+    spawn, calls = _make_spawn_hook()
+    monkeypatch.setattr(server, "_conduct_execute_spawn", spawn)
+
+    server._methods["conductor.execute"](
+        "r1", {"ownerConfirmed": True, "approvalId": "cockpit-x"}
+    )
+
+    argv = calls[0]
+    # LOCAL-ONLY: no frontier flag in any form is ever passed.
+    assert not any("frontier" in str(a).lower() for a in argv)
+    assert "--frontier-approved" not in argv
+    assert "--frontier" not in argv
+    assert "--cloud" not in argv
+
+
+def test_execute_synthesizes_approval_id_when_absent(monkeypatch):
+    spawn, calls = _make_spawn_hook()
+    monkeypatch.setattr(server, "_conduct_execute_spawn", spawn)
+
+    resp = server._methods["conductor.execute"]("r1", {"ownerConfirmed": True})
+
+    approval_id = resp["result"]["approvalId"]
+    assert isinstance(approval_id, str)
+    assert approval_id.strip() != ""
+    # The synthesized id is what was passed to the spawn after --approval-id.
+    argv = calls[0]
+    assert argv[argv.index("--approval-id") + 1] == approval_id
+
+
+def test_execute_passes_mock_model_flag_only_when_requested(monkeypatch):
+    spawn, calls = _make_spawn_hook()
+    monkeypatch.setattr(server, "_conduct_execute_spawn", spawn)
+
+    server._methods["conductor.execute"](
+        "r1", {"ownerConfirmed": True, "approvalId": "a", "mockModel": True}
+    )
+    server._methods["conductor.execute"](
+        "r1", {"ownerConfirmed": True, "approvalId": "b"}
+    )
+
+    assert "--mock-model" in calls[0]
+    assert "--mock-model" not in calls[1]
+
+
+def test_execute_returns_immediately_without_awaiting_the_run(monkeypatch):
+    # The spawn hook must be NON-BLOCKING: the handler returns even if the hook
+    # would block for the ~30-60s run. We prove the handler does not wait on a
+    # result - it returns as soon as the (fire-and-forget) hook is invoked.
+    invoked = {"count": 0}
+
+    def _spawn(argv):  # noqa: ANN001 - fire-and-forget; returns None, never a future.
+        invoked["count"] += 1
+        return None
+
+    monkeypatch.setattr(server, "_conduct_execute_spawn", _spawn)
+
+    resp = server._methods["conductor.execute"](
+        "r1", {"ownerConfirmed": True, "approvalId": "z"}
+    )
+
+    assert invoked["count"] == 1
+    assert resp["result"]["started"] is True
+
+
+def test_execute_spawn_failure_maps_to_reason(monkeypatch):
+    def _boom(argv):  # noqa: ANN001
+        raise RuntimeError("kaboom /secret/path/creds")
+
+    monkeypatch.setattr(server, "_conduct_execute_spawn", _boom)
+
+    resp = server._methods["conductor.execute"](
+        "r1", {"ownerConfirmed": True, "approvalId": "q"}
+    )
+
+    # A spawn failure rides back as the {ok:false, reason} envelope; the RPC
+    # itself still succeeds so the renderer can show an ErrorState.
+    assert "result" in resp
+    assert resp["result"]["ok"] is False
+    assert resp["result"]["reason"] == "conduct_execute_error"
+    # Reason must NOT leak the exception text (could carry paths/creds).
+    assert "secret" not in json.dumps(resp["result"])
+    assert "kaboom" not in json.dumps(resp["result"])
+
+
+def test_execute_default_spawn_is_detached_non_blocking_no_shell(monkeypatch):
+    # The real spawn must use subprocess.Popen with start_new_session=True
+    # (detached), DEVNULL/log stdout+stderr, NEVER shell=True, and MUST NOT wait.
+    captured = {}
+
+    class _FakePopen:
+        def __init__(self, argv, **kwargs):
+            captured["argv"] = argv
+            captured["kwargs"] = kwargs
+
+        def wait(self, *a, **k):  # noqa: ANN002, ANN003
+            captured["waited"] = True
+
+    monkeypatch.setattr(server.subprocess, "Popen", _FakePopen)
+
+    server._default_conduct_execute_spawn(
+        [server._resolve_node(), "/x/conduct.mjs", "--execute"]
+    )
+
+    assert isinstance(captured["argv"], list)
+    kwargs = captured["kwargs"]
+    assert kwargs.get("start_new_session") is True
+    assert kwargs.get("shell") in (None, False)  # never shell=True
+    # The handler must not block on the run.
+    assert "waited" not in captured
+
+
+def test_build_conduct_execute_argv_local_only_and_owner_gated():
+    # The argv builder is the single authority for the execute command line.
+    argv = server._build_conduct_execute_argv("appr-123", mock_model=False)
+
+    assert isinstance(argv, list)
+    assert argv[-0:] != []  # non-empty
+    assert "--execute" in argv
+    assert "--owner-approved" in argv
+    assert argv[argv.index("--approval-id") + 1] == "appr-123"
+    assert "--emit-receipt-to-neon" in argv
+    assert "--mock-model" not in argv
+    # LOCAL-ONLY invariant: never a frontier flag.
+    assert not any("frontier" in str(a).lower() for a in argv)
+
+    argv_mock = server._build_conduct_execute_argv("a", mock_model=True)
+    assert "--mock-model" in argv_mock

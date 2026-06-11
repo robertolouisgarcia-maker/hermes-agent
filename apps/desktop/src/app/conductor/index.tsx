@@ -1,17 +1,38 @@
 import { useStore } from '@nanostores/react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import type * as React from 'react'
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { StatusDot, type StatusTone } from '@/components/status-dot'
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle
+} from '@/components/ui/dialog'
 import { ErrorState } from '@/components/ui/error-state'
 import { Loader } from '@/components/ui/loader'
 import { type Translations, useI18n } from '@/i18n'
-import { Activity, GitBranch, Globe, type IconComponent, Lock, Package, SteeringWheel, Zap } from '@/lib/icons'
+import {
+  Activity,
+  CheckCircle2,
+  GitBranch,
+  Globe,
+  type IconComponent,
+  Lock,
+  Package,
+  Play,
+  SteeringWheel,
+  Zap
+} from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { $activeMissionId, setActiveMission } from '@/store/conductor'
 
-import { OverlayMain, OverlayNavItem, OverlaySidebar, OverlaySplitLayout } from '../overlays/overlay-split-layout'
+import { OverlayMain, OverlayNavItem, OverlayNewButton, OverlaySidebar, OverlaySplitLayout } from '../overlays/overlay-split-layout'
 import { OverlayView } from '../overlays/overlay-view'
 import { EmptyState, ListRow, SectionHeading } from '../settings/primitives'
 
@@ -143,6 +164,34 @@ interface ConductorSystemcheckResponse extends GatewayResult {
   report?: SelfCheckReport
 }
 
+// -- Drive (preview + owner-confirm + run) shapes ---------------------
+// The conduct dry plan the gateway returns under { ok: true, plan }. Only the
+// fields the drive preview renders (the agents with their role + lane, and the
+// top-level reason); everything is optional so a partial plan still renders.
+interface ConductPlanAgent {
+  role?: string
+  lane?: string
+  provider?: string
+}
+
+interface ConductPlan {
+  valid?: boolean
+  reason?: string
+  mode?: string
+  agents?: ConductPlanAgent[]
+}
+
+interface ConductorDryRunResponse extends GatewayResult {
+  plan?: ConductPlan
+}
+
+// The execute response: { ok: true, started: true, approvalId } on success, or
+// the { ok: false, reason } envelope on a spawn failure.
+interface ConductorExecuteResponse extends GatewayResult {
+  started?: boolean
+  approvalId?: string
+}
+
 // Verdict → StatusDot tone. READY reads as success (good), DEGRADED as a
 // warning, NOT-READY as destructive, anything unknown as a muted pip.
 const VERDICT_TONE: Record<string, StatusTone> = {
@@ -208,6 +257,10 @@ export function ConductorView({ onClose, requestGateway }: ConductorViewProps) {
   const { t } = useI18n()
   const c = t.conductor
   const activeMissionId = useStore($activeMissionId)
+
+  // The drive dialog: preview a conduct (dry plan), then with an explicit owner
+  // confirm, run it locally. Closed by default; the sidebar "New run" opens it.
+  const [driveOpen, setDriveOpen] = useState(false)
 
   const missionsQuery = useQuery({
     queryKey: ['conductor', 'missions'],
@@ -302,6 +355,8 @@ export function ConductorView({ onClose, requestGateway }: ConductorViewProps) {
             <span>{c.title}</span>
           </div>
 
+          <OverlayNewButton icon="play" label={c.drive.newRun} onClick={() => setDriveOpen(true)} />
+
           {missionsQuery.isError ? (
             <p className="px-2 py-4 text-center text-xs text-destructive">{c.lanesError}</p>
           ) : missionsQuery.isPending ? (
@@ -346,6 +401,8 @@ export function ConductorView({ onClose, requestGateway }: ConductorViewProps) {
           )}
         </OverlayMain>
       </OverlaySplitLayout>
+
+      <DriveDialog c={c} onOpenChange={setDriveOpen} open={driveOpen} requestGateway={requestGateway} />
     </OverlayView>
   )
 }
@@ -676,4 +733,202 @@ function detailValue(value: string | undefined): React.ReactNode {
       {value || '—'}
     </span>
   )
+}
+
+// -- Drive dialog: preview a conduct, then owner-confirm + run it -----
+//
+// The interactive heart of the cockpit. Step 1 PREVIEW calls conductor.dryRun
+// (side-effect-free, no spawn/spend) and renders the plan's agents + lanes +
+// reason. Step 2 RUN is GATED behind an explicit owner-approval checkbox (the
+// confirm IS the Phase-2 approval); only when it is checked does the Run button
+// enable and call conductor.execute({ ownerConfirmed: true, approvalId }). The
+// run is LOCAL and FREE - a hint line makes that obvious and reassures that no
+// frontier model is triggered. Composed from the Dialog + Button + Checkbox
+// primitives and existing list primitives; flat, tokens only.
+function DriveDialog({
+  c,
+  onOpenChange,
+  open,
+  requestGateway
+}: {
+  c: Translations['conductor']
+  onOpenChange: (open: boolean) => void
+  open: boolean
+  requestGateway: RequestGateway
+}) {
+  const d = c.drive
+
+  // The owner-approval confirm. The Run button is disabled until this is true.
+  const [confirmed, setConfirmed] = useState(false)
+
+  // Generate one approvalId per dialog session (regenerated on each open). It is
+  // opaque; the gateway accepts it and rides it on the owner-gated CLI flag.
+  const [approvalId, setApprovalId] = useState(() => makeApprovalId())
+
+  // Reset the dialog's transient state whenever it (re)opens so a prior preview,
+  // confirm, or started receipt never leaks into a fresh drive.
+  const previewMutation = useMutation({
+    mutationFn: async () => {
+      const res = await requestGateway<ConductorDryRunResponse>('conductor.dryRun', {})
+      if (res && res.ok === false) {
+        throw new Error(res.reason ?? 'conduct_dryrun_unavailable')
+      }
+
+      return res
+    }
+  })
+
+  const executeMutation = useMutation({
+    mutationFn: async () => {
+      const res = await requestGateway<ConductorExecuteResponse>('conductor.execute', {
+        approvalId,
+        mockModel: true,
+        ownerConfirmed: true
+      })
+      if (res && res.ok === false) {
+        throw new Error(res.reason ?? 'conduct_execute_unavailable')
+      }
+
+      return res
+    }
+  })
+
+  // On open transition, clear everything so each drive starts clean.
+  useEffect(() => {
+    if (open) {
+      setConfirmed(false)
+      setApprovalId(makeApprovalId())
+      previewMutation.reset()
+      executeMutation.reset()
+    }
+    // Only react to the open transition; the mutations are stable refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  const plan = previewMutation.data?.plan
+  const agents = plan?.agents ?? []
+  const started = executeMutation.data?.started === true
+  const startedApprovalId = executeMutation.data?.approvalId ?? approvalId
+
+  return (
+    <Dialog onOpenChange={onOpenChange} open={open}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle icon={SteeringWheel}>{d.title}</DialogTitle>
+          <DialogDescription>{d.intro}</DialogDescription>
+        </DialogHeader>
+
+        {started ? (
+          <div className="grid place-items-center gap-3 py-6 text-center">
+            <CheckCircle2 className="size-7 text-primary" />
+            <div>
+              <div className="text-[length:var(--conversation-text-font-size)] font-medium text-foreground">{d.started}</div>
+              <div className="mt-1 max-w-prose text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
+                {d.startedDesc}
+              </div>
+              <div className="mt-2 font-mono text-[0.68rem] text-muted-foreground/60">{d.startedApproval(startedApprovalId)}</div>
+            </div>
+          </div>
+        ) : (
+          <div className="grid gap-1">
+            {/* Local-only + free hint: keep it obvious frontier is not triggered. */}
+            <div className="flex items-center gap-2 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
+              <Lock className="size-3 shrink-0" />
+              <span>{d.localHint}</span>
+            </div>
+
+            {previewMutation.isError ? (
+              <div className="grid min-h-32 place-items-center">
+                <ErrorState description={d.previewErrorDesc} title={d.previewError} />
+              </div>
+            ) : previewMutation.isPending ? (
+              <div className="grid min-h-32 place-items-center">
+                <Loader label={d.previewing} />
+              </div>
+            ) : !plan ? (
+              <EmptyState description={d.noPlanDesc} title={d.noPlan} />
+            ) : (
+              <div>
+                <SectionHeading icon={Package} meta={agents.length ? String(agents.length) : undefined} title={d.agents} />
+                {agents.length === 0 ? (
+                  <p className="py-2 text-xs text-muted-foreground">{d.noAgents}</p>
+                ) : (
+                  <div className="flex flex-col">
+                    {agents.map((agent, index) => (
+                      <ListRow
+                        action={
+                          <span className="font-mono text-[length:var(--conversation-caption-font-size)] text-(--ui-text-secondary) sm:justify-self-end">
+                            {d.laneLabel(agent.lane ?? '—')}
+                          </span>
+                        }
+                        description={agent.provider}
+                        key={`${agent.role ?? 'agent'}-${index}`}
+                        title={<span className="font-mono">{agent.role ?? '—'}</span>}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {plan.reason && (
+                  <p className="mt-1 font-mono text-[0.68rem] text-muted-foreground/60">
+                    <span>{d.planReason}: </span>
+                    <span>{plan.reason}</span>
+                  </p>
+                )}
+
+                {/* Owner approval gate: the Run button stays disabled until checked. */}
+                <label className="mt-3 flex cursor-pointer items-start gap-2.5">
+                  <Checkbox
+                    aria-label={d.confirm}
+                    checked={confirmed}
+                    className="mt-0.5"
+                    onCheckedChange={value => setConfirmed(value === true)}
+                  />
+                  <span className="text-[length:var(--conversation-text-font-size)] text-foreground">{d.confirm}</span>
+                </label>
+
+                {executeMutation.isError && (
+                  <div className="mt-3 grid place-items-center">
+                    <ErrorState description={d.runErrorDesc} title={d.runError} />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        <DialogFooter>
+          {started ? (
+            <Button onClick={() => onOpenChange(false)} variant="secondary">
+              {d.done}
+            </Button>
+          ) : (
+            <>
+              <Button onClick={() => previewMutation.mutate()} variant="secondary">
+                {previewMutation.isPending ? d.previewing : plan ? d.previewAgain : d.preview}
+              </Button>
+              <Button
+                disabled={!confirmed || !plan || executeMutation.isPending}
+                onClick={() => executeMutation.mutate()}
+              >
+                <Play />
+                {executeMutation.isPending ? d.running : d.run}
+              </Button>
+            </>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// A short, opaque approval id (no clock dependency the renderer cannot trust).
+// crypto.randomUUID where available, else a random hex fallback.
+function makeApprovalId(): string {
+  const uuid =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : Math.random().toString(16).slice(2)
+
+  return `cockpit-${uuid}`
 }
