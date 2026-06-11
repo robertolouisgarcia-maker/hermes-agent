@@ -659,7 +659,9 @@ function receiptsTail() {
           agents: [
             { role: 'implementer', provider: 'lmstudio', model: 'qwen2.5-coder', lane: 'local', verdict: 'pass' },
             { role: 'judge', provider: 'lmstudio', model: 'qwen2.5-coder', lane: 'local', verdict: 'pass' }
-          ]
+          ],
+          diffStat: ' src/a.ts | 4 ++--\n src/b.ts | 9 +++++++--\n 2 files changed, 9 insertions(+), 4 deletions(-)',
+          changedFiles: ['src/a.ts', 'src/b.ts']
         }
       },
       {
@@ -841,5 +843,131 @@ describe('ConductorView agents + economy + routing', () => {
     await waitFor(() => {
       expect(screen.getByText('Could not load receipts')).toBeTruthy()
     })
+  })
+})
+
+// -- Cockpit changes (CC-E: the conductor's diff) --------------------
+//
+// The mission detail surfaces the LATEST receipt's diff: a `git diff --stat`
+// summary in a LogView plus the changed-file list. Diff-less receipts (dry runs)
+// show a quiet "No changes recorded" line; a mission with no receipt at all
+// renders nothing for this section (the Agents section already owns that case).
+
+describe('ConductorView changes', () => {
+  it('MissionDetail shows the diffStat in a LogView + the changed-files list from the latest receipt', async () => {
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: MISSIONS }
+      }
+
+      if (method === 'conductor.cockpit.get') {
+        return cockpitFor(String(params?.missionId ?? 'mission-alpha'))
+      }
+
+      if (method === 'conductor.receipts.tail') {
+        return receiptsTail()
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+
+    // The first lane (mission-alpha) auto-selects -> the diff of its LATEST
+    // receipt (eventSequence 42) renders. The Changes heading is present.
+    await waitFor(() => {
+      expect(screen.getByText('Changes')).toBeTruthy()
+    })
+
+    // The git diff --stat summary renders (verbatim, in the LogView). Use a
+    // substring matcher because the LogView holds the whole multi-line block.
+    expect(screen.getByText(/2 files changed, 9 insertions\(\+\), 4 deletions\(-\)/)).toBeTruthy()
+
+    // A row per changed file (mono path).
+    expect(screen.getByText('src/a.ts')).toBeTruthy()
+    expect(screen.getByText('src/b.ts')).toBeTruthy()
+
+    // The changed-files subheading carries the count.
+    expect(screen.getByText('Changed files')).toBeTruthy()
+  })
+
+  it('MissionDetail shows the quiet no-changes line for a diff-less receipt', async () => {
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: MISSIONS }
+      }
+
+      if (method === 'conductor.cockpit.get') {
+        return cockpitFor(String(params?.missionId ?? 'mission-alpha'))
+      }
+
+      if (method === 'conductor.receipts.tail') {
+        // A receipt for the selected lane, but with an empty diff (dry run).
+        return {
+          ok: true,
+          nextCursor: 0,
+          receipts: [
+            {
+              eventSequence: 5,
+              missionId: 'mission-alpha',
+              receipt: {
+                agents: [{ role: 'implementer', provider: 'lmstudio', model: 'qwen', lane: 'local', verdict: 'pass' }],
+                diffStat: '',
+                changedFiles: []
+              }
+            }
+          ]
+        }
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+
+    await waitFor(() => {
+      expect(screen.getByText('Changes')).toBeTruthy()
+    })
+    // The quiet no-changes line, not a crash or an empty LogView.
+    expect(screen.getByText('No changes recorded.')).toBeTruthy()
+  })
+
+  it('MissionDetail renders nothing for the Changes section when the mission has no receipt', async () => {
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'conductor.missions.list') {
+        return { missions: MISSIONS }
+      }
+
+      if (method === 'conductor.cockpit.get') {
+        return cockpitFor(String(params?.missionId ?? 'mission-alpha'))
+      }
+
+      if (method === 'conductor.receipts.tail') {
+        // Receipts exist, but none for mission-alpha (the auto-selected lane).
+        return {
+          ok: true,
+          nextCursor: 0,
+          receipts: [
+            {
+              eventSequence: 7,
+              missionId: 'mission-bravo',
+              receipt: { agents: [{ role: 'reviewer', provider: 'anthropic', model: 'claude-opus', lane: 'claude', verdict: 'fail' }] }
+            }
+          ]
+        }
+      }
+
+      return { projection: {} }
+    })
+
+    renderConductor(requestGateway)
+
+    // The mission detail renders (the Agents section owns the no-run case).
+    await waitFor(() => {
+      expect(screen.getByText('Agents')).toBeTruthy()
+    })
+    // The Changes section renders nothing at all - no heading, no quiet line.
+    expect(screen.queryByText('Changes')).toBeNull()
+    expect(screen.queryByText('No changes recorded.')).toBeNull()
   })
 })

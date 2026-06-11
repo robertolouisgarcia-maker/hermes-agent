@@ -1257,6 +1257,11 @@ export const ja = defineLocale({
       noRouting: 'まだルーティングデータはありません。',
       receiptsError: 'レシートを読み込めませんでした',
       receiptsErrorDesc: 'ゲートウェイがコンダクターのレシートフィードに接続できませんでした。自動的に再試行します。'
+    },
+    changes: {
+      changesTitle: '変更',
+      changedFilesTitle: '変更されたファイル',
+      noChanges: '変更は記録されていません。'
     }
   },
 

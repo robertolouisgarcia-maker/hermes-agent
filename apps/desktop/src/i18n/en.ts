@@ -1123,6 +1123,11 @@ export const en: Translations = {
       noRouting: 'No routing data yet.',
       receiptsError: 'Could not load receipts',
       receiptsErrorDesc: 'The gateway could not reach the Conductor receipts feed. It will retry automatically.'
+    },
+    changes: {
+      changesTitle: 'Changes',
+      changedFilesTitle: 'Changed files',
+      noChanges: 'No changes recorded.'
     }
   },
 

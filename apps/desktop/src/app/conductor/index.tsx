@@ -16,12 +16,14 @@ import {
 } from '@/components/ui/dialog'
 import { ErrorState } from '@/components/ui/error-state'
 import { Loader } from '@/components/ui/loader'
+import { LogView } from '@/components/ui/log-view'
 import { type Translations, useI18n } from '@/i18n'
 import {
   Activity,
   Brain,
   CheckCircle2,
   Cpu,
+  FileText,
   GitBranch,
   Globe,
   type IconComponent,
@@ -220,6 +222,11 @@ interface ReceiptAgent {
 
 interface ReceiptBody {
   agents?: ReceiptAgent[]
+  // The conductor's diff for this run (CC-E): a `git diff --stat` summary string
+  // and the list of changed file paths. Both optional - dry runs and diff-less
+  // receipts carry neither, older receipts predate the fields.
+  diffStat?: string
+  changedFiles?: string[]
 }
 
 interface ReceiptEvent {
@@ -948,6 +955,8 @@ function MissionDetail({
 
         <AgentsSection ins={c.insights} missionId={mission.missionId} receipts={receipts} receiptsError={receiptsError} />
 
+        <ChangesSection ch={c.changes} missionId={mission.missionId} receipts={receipts} />
+
         <SectionHeading
           icon={Package}
           meta={controls.length ? String(controls.length) : undefined}
@@ -1048,6 +1057,58 @@ function AgentsSection({
               title={<span className="font-mono">{agent.role ?? '—'}</span>}
             />
           ))}
+        </div>
+      )}
+    </>
+  )
+}
+
+// The conductor's diff for a mission: the diff carried on its LATEST receipt
+// (max eventSequence). The `git diff --stat` summary renders in the shared
+// LogView (mono), the changed files as a flat list under a counted subheading.
+// A diff-less receipt (dry run) shows a quiet "no changes recorded" line; a
+// mission with NO receipt renders nothing (the Agents section owns the no-run
+// case, so this section stays silent rather than duplicating it). Composed from
+// existing primitives + tokens; no new gateway calls (reuses the receipts feed).
+function ChangesSection({
+  ch,
+  missionId,
+  receipts
+}: {
+  ch: Translations['conductor']['changes']
+  missionId: string
+  receipts: ReceiptEvent[]
+}) {
+  const latest = useMemo(() => latestReceiptFor(receipts, missionId), [receipts, missionId])
+
+  // No receipt at all for this mission: render nothing for the Changes section.
+  if (!latest) {
+    return null
+  }
+
+  const diffStat = latest.receipt?.diffStat?.trim() ?? ''
+  const changedFiles = latest.receipt?.changedFiles ?? []
+  const hasDiff = diffStat.length > 0 || changedFiles.length > 0
+
+  return (
+    <>
+      <SectionHeading icon={FileText} title={ch.changesTitle} />
+      {!hasDiff ? (
+        <p className="py-2 text-xs text-muted-foreground">{ch.noChanges}</p>
+      ) : (
+        <div className="flex flex-col gap-2 py-1">
+          {diffStat.length > 0 && <LogView className="max-h-48">{diffStat}</LogView>}
+          {changedFiles.length > 0 && (
+            <div className="flex flex-col">
+              <SectionHeading icon={GitBranch} meta={String(changedFiles.length)} title={ch.changedFilesTitle} />
+              {changedFiles.map(file => (
+                <ListRow
+                  key={file}
+                  title={<span className="font-mono text-[length:var(--conversation-caption-font-size)] break-all text-(--ui-text-secondary)">{file}</span>}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
     </>

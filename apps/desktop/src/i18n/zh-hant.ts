@@ -1222,6 +1222,11 @@ export const zhHant = defineLocale({
       noRouting: '尚無路由資料。',
       receiptsError: '無法載入收據',
       receiptsErrorDesc: '閘道無法連接到指揮的收據來源。它將自動重試。'
+    },
+    changes: {
+      changesTitle: '變更',
+      changedFilesTitle: '已變更的檔案',
+      noChanges: '未記錄任何變更。'
     }
   },
 

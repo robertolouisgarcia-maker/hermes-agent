@@ -1309,6 +1309,11 @@ export const zh: Translations = {
       noRouting: '尚无路由数据。',
       receiptsError: '无法加载收据',
       receiptsErrorDesc: '网关无法连接到指挥的收据源。它将自动重试。'
+    },
+    changes: {
+      changesTitle: '更改',
+      changedFilesTitle: '已更改的文件',
+      noChanges: '未记录任何更改。'
     }
   },
 

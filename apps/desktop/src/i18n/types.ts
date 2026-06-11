@@ -868,6 +868,11 @@ export interface Translations {
       receiptsError: string
       receiptsErrorDesc: string
     }
+    changes: {
+      changesTitle: string
+      changedFilesTitle: string
+      noChanges: string
+    }
   }
 
   artifacts: {
