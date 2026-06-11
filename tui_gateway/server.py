@@ -175,6 +175,9 @@ _LONG_HANDLERS = frozenset(
     {
         "browser.manage",
         "cli.exec",
+        "conductor.cockpit.get",
+        "conductor.missions.list",
+        "conductor.receipts.tail",
         "plugins.manage",
         "session.branch",
         "session.compress",
@@ -6144,6 +6147,124 @@ def _(rid, params: dict) -> dict:
         )
     except Exception as e:
         return _err(rid, 5004, str(e))
+
+
+# ── Methods: conductor cockpit (read-only, ADR-2 thin proxy) ─────────
+#
+# These let the desktop renderer read the Conductor cockpit over the SAME
+# /api/ws gateway that carries chat. The gateway is a THIN PROXY: it
+# subprocess-invokes a PH Node runner that holds all the validated
+# control-plane logic. The gateway learns NO Neon, NO SQL, holds NO secrets
+# (the runner fetches its own scoped creds from AWS SM). All three handlers
+# are READ-ONLY and require no session — cockpit data is global.
+
+_DEFAULT_COCKPIT_TOOL_RUNNER = (
+    "/Users/robert/Projects/personal-hermes-os/scripts/run-cockpit-tool-local.mjs"
+)
+_COCKPIT_TOOL_TIMEOUT_S = 20
+
+
+def _resolve_node() -> str:
+    import shutil
+
+    return shutil.which("node") or "/opt/homebrew/bin/node"
+
+
+def _resolve_cockpit_runner_path() -> str:
+    return os.environ.get(
+        "HERMES_COCKPIT_TOOL_RUNNER", _DEFAULT_COCKPIT_TOOL_RUNNER
+    )
+
+
+def _default_cockpit_runner(argv: list[str], timeout: int) -> dict:
+    """Real runner: subprocess-invoke the PH Node cockpit tool.
+
+    *argv* is an ARGV LIST ([node, runner_path, tool_name, json_args]); never
+    shell=True, so there is no shell injection surface and the json args ride
+    as one opaque argument. Returns the parsed last non-empty stdout line.
+    On any failure returns {"ok": False, "reason": "cockpit_runner_<kind>"} and
+    NEVER includes stderr or the argv (they could carry paths/creds).
+    """
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "cockpit_runner_timeout"}
+    except FileNotFoundError:
+        return {"ok": False, "reason": "cockpit_runner_not_found"}
+    except Exception:
+        return {"ok": False, "reason": "cockpit_runner_error"}
+
+    lines = [ln for ln in (completed.stdout or "").splitlines() if ln.strip()]
+    if not lines:
+        return {"ok": False, "reason": "cockpit_runner_empty"}
+    try:
+        parsed = json.loads(lines[-1])
+    except (ValueError, TypeError):
+        return {"ok": False, "reason": "cockpit_runner_parse"}
+    if not isinstance(parsed, dict):
+        return {"ok": False, "reason": "cockpit_runner_parse"}
+    return parsed
+
+
+# Injectable hook so tests can substitute a fake runner without spawning node.
+_cockpit_tool_runner = _default_cockpit_runner
+
+
+def _run_cockpit_tool(tool_name: str, args: dict) -> dict:
+    """Build the ARGV LIST and invoke the (injectable) cockpit runner.
+
+    Args ride as a single json.dumps(args) argument — never interpolated into
+    a shell. Always returns a dict (the tool's JSON, or a cockpit_runner_*
+    reason); never raises.
+    """
+    argv = [
+        _resolve_node(),
+        _resolve_cockpit_runner_path(),
+        tool_name,
+        json.dumps(args),
+    ]
+    try:
+        return _cockpit_tool_runner(argv, timeout=_COCKPIT_TOOL_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "cockpit_runner_timeout"}
+    except FileNotFoundError:
+        return {"ok": False, "reason": "cockpit_runner_not_found"}
+    except Exception:
+        return {"ok": False, "reason": "cockpit_runner_error"}
+
+
+@method("conductor.missions.list")
+def _(rid, params: dict) -> dict:
+    result = _run_cockpit_tool(
+        "cockpit_missions_list", {"limit": params.get("limit", 50)}
+    )
+    return _ok(rid, result)
+
+
+@method("conductor.cockpit.get")
+def _(rid, params: dict) -> dict:
+    mission_id = params.get("missionId")
+    if not isinstance(mission_id, str) or not mission_id.strip():
+        return _err(rid, 4002, "missionId required")
+    result = _run_cockpit_tool("cockpit_projection_get", {"missionId": mission_id})
+    return _ok(rid, result)
+
+
+@method("conductor.receipts.tail")
+def _(rid, params: dict) -> dict:
+    result = _run_cockpit_tool(
+        "cockpit_receipts_tail",
+        {
+            "afterSequence": params.get("afterSequence", 0),
+            "limit": params.get("limit", 100),
+        },
+    )
+    return _ok(rid, result)
 
 
 # ── Methods: config ──────────────────────────────────────────────────
